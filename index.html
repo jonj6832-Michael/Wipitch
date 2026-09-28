@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>WiPitch</title>
+	<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+	<link rel="stylesheet" href="/src/ui/style.css">
+</head>
+<body>
+	<header>
+		<h1><a href="https://nicechord.com" target="_blank" rel="noopener">WiPitch <span class="by">by NiceChord</span></a></h1>
+		<label class="file">
+			開啟音檔<input type="file" id="file" accept="audio/*">
+		</label>
+		<div class="transport">
+			<button id="play" class="icon" title="播放（空白鍵）" disabled>▶</button>
+			<button id="stop" class="icon" title="停止並回到開頭" disabled>■</button>
+			<button id="loop-btn" class="icon" title="循環播放選取範圍（L）">↻</button>
+			<button id="follow-btn" class="icon" title="畫面跟隨播放頭捲動（F）">⇥</button>
+			<span id="clock">0:00.000</span>
+		</div>
+		<button id="export" disabled>匯出 WAV</button>
+		<button id="save" disabled>存檔</button>
+		<label class="file">讀檔<input type="file" id="open-project" accept=".json"></label>
+		<div class="modes" title="移調時音色要不要跟著跑">
+			<button id="mode-voice" class="on" title="人聲：移調時保留音色，拉高 7 個半音仍是同一個人">人聲</button>
+			<button id="mode-instrument" title="樂器：音色完全跟著移調（等同關掉音色保留）">樂器</button>
+		</div>
+		<div class="spacer"></div>
+		<div id="bg-status" hidden title="有伸縮的段落在背景重新精算，算完會自動換上沒有接縫的版本；期間可以照常播放與編輯">
+			<span class="dot"></span><span id="bg-text">背景精算</span>
+		</div>
+		<div id="status">拖一個音檔進來，或按「開啟音檔」</div>
+		<div id="hint"></div>
+		<a id="help-link" href="https://code.wiwi.blog/wiwi/WiPitch" target="_blank" rel="noopener" title="使用說明與原始碼" aria-label="使用說明與原始碼">?</a>
+	</header>
+
+	<div id="progress" hidden><div id="progress-bar"></div></div>
+
+	<main id="stage" hidden>
+		<div class="track" id="pitch-track">
+			<div id="pitch-toolbar">
+				<!-- 左半邊：選取工具且有選取 → 參數面板；畫筆工具 → 畫筆選項；其他 → 空 -->
+				<div class="pen-opts" id="pen-opts" hidden>
+					<span class="group">
+						<label class="sw" title="畫出來的線要自動加抖音（V）">
+							<input type="checkbox" id="vib-on"><span>抖音</span>
+						</label>
+						<input type="number" id="vib-depth" min="0.05" max="3" step="0.05" value="0.5" title="幅度（上下各多少）">
+						<span class="unit" id="vib-unit">半音</span>
+						<input type="number" id="vib-rate" min="0.5" max="12" step="0.1" value="5.5" title="速度（Hz）">
+						<span class="unit">Hz</span>
+					</span>
+					<span class="group">
+						<label class="sw" title="起音漸入：抖音從 0 長到滿，而不是一開始就滿幅度（Shift+V）">
+							<input type="checkbox" id="vib-onset-on" checked><span>漸入</span>
+						</label>
+						<input type="number" id="vib-onset" min="0" max="2000" step="50" value="200" title="漸入時間">
+						<span class="unit">ms</span>
+					</span>
+				</div>
+				<div id="panel" hidden>
+					<span class="sel-info" id="sel-info">尚未選取</span>
+
+					<div class="group" data-lane="pitch">
+						<label for="shift">音高</label>
+						<button data-nudge="-1">−1</button>
+						<button data-nudge="-0.1">−0.1</button>
+						<input type="range" id="shift" min="-12" max="12" step="0.01" value="0">
+						<button data-nudge="0.1">+0.1</button>
+						<button data-nudge="1">+1</button>
+						<output id="shift-out">0.00 半音</output>
+					</div>
+
+					<div class="group" data-lane="pitch">
+						<label for="flatten" title="選取範圍內音高的起伏：0 = 完全壓平，1 = 原樣，大於 1 = 放大。也可以在選取區內 Shift+上下拖曳">抖動</label>
+						<input type="range" id="flatten" min="0" max="4" step="0.01" value="1">
+						<output id="flatten-out">1.00×</output>
+					</div>
+
+					<div class="group" data-lane="gain" hidden>
+						<label for="gain">音量</label>
+						<input type="range" id="gain" min="-24" max="12" step="0.1" value="0">
+						<output id="gain-out">0.0 dB</output>
+					</div>
+
+					<div class="group" data-lane="formant" hidden>
+						<label for="formant">Formant</label>
+						<input type="range" id="formant" min="-12" max="12" step="0.01" value="0">
+						<output id="formant-out">0.00 半音</output>
+					</div>
+				</div>
+				<div id="lane-bar">
+					<div class="tools">
+						<button id="tool-select" class="tool on" title="選取工具（S）">▭ 選取</button>
+						<button id="tool-pen" class="tool" title="畫筆／標記工具（B）：在曲線區畫線，在波形區點擊加錨點">✎ 畫筆╱標記</button>
+					</div>
+					<div class="lane-chips" id="lane-chips">
+						<!-- 由 main.ts 填入：每條 lane 一組「顯示 / 編輯」 -->
+					</div>
+				</div>
+			</div>
+			<div id="pianoroll-wrap">
+				<div id="piano-keys" role="img" aria-label="鋼琴音高對照：高音在上、低音在下，中央 Do 為 C4" title="鋼琴音高對照 · 中央 Do = C4"></div>
+				<canvas id="pianoroll"></canvas>
+				<div id="vbar"></div>
+			</div>
+		</div>
+		<div id="hbar-row"><div id="hbar"></div></div>
+		<div id="wave-splitter" title="拖曳調整波形軌高度，雙擊還原"></div>
+		<div class="track" id="wave-track">
+			<canvas id="waveform"></canvas>
+			<input type="range" id="amp-zoom" min="0" max="1" step="0.001" value="0.2314"
+				title="波形放大（只影響顯示）。雙擊還原（Alt+滾輪）">
+		</div>
+		<div id="ref-splitter" title="拖曳調整參考音軌高度，雙擊還原"></div>
+		<div class="track" id="ref-track">
+			<canvas id="refwave"></canvas>
+			<input type="range" id="ref-amp-zoom" min="0" max="1" step="0.001" value="0.2314"
+				title="參考音軌波形放大（只影響顯示）。雙擊還原（Alt+滾輪）">
+			<div id="bg-bar">
+				<label class="file" title="載入一個一起播放的參考音檔（伴奏、導唱），只用來監聽，不會匯出">
+					<span id="bg-file-text">載入參考音軌</span><input type="file" id="bg-file" accept="audio/*">
+				</label>
+				<span id="bg-name" hidden>無</span>
+				<span id="bg-controls" hidden>
+					<button id="bg-mute" title="參考音軌靜音（M）">靜音</button>
+					<input type="range" id="bg-vol" min="-40" max="6" step="0.5" value="0" title="參考音軌音量（dB），雙擊回 0">
+					<output id="bg-vol-out">0 dB</output>
+					<button data-bg-nudge="-10" title="參考音軌提早 10ms">−10</button>
+					<input type="number" id="bg-offset" step="1" value="0" title="參考音軌 offset（ms），正數 = 參考音軌晚開始">
+					<button data-bg-nudge="10" title="參考音軌延後 10ms">+10</button>
+					<span class="unit">ms</span>
+					<button id="bg-remove" title="移除參考音軌">✕</button>
+				</span>
+			</div>
+		</div>
+	</main>
+
+	<footer id="global-bar" hidden>
+		<div class="group">
+			<label title="選取範圍調整時，兩端用多長的時間漸變過去；太短聽起來會「跳」一下。畫筆固定 20ms，不受影響">邊界過渡</label>
+			<input type="number" class="ramp" id="ramp" min="5" max="500" step="5" value="100">
+			<span class="unit">ms</span>
+			<span class="explain" title="選取範圍調整時，兩端用多長的時間漸變過去；太短聽起來會「跳」一下。畫筆固定 20ms，不受影響">選取範圍兩端的漸變時間</span>
+		</div>
+		<div class="group">
+			<label title="相對原唱的音高偏移，每秒最多變化幾個半音。原唱本身有很陡的音高變化、你卻把它修平時，偏移量會變成一個陡的階梯，聽起來像抽一下；這個上限會把階梯拉緩。0 = 不限制">音高變化上限</label>
+			<input type="number" class="ramp" id="slope" min="0" max="1000" step="10" value="60">
+			<span class="unit">半音/秒</span>
+		</div>
+		<div class="spacer"></div>
+		<div class="group">
+			<label>選取範圍歸零</label>
+			<button data-reset="pitch">音高</button>
+			<button data-reset="gain">音量</button>
+			<button data-reset="formant">Formant</button>
+			<button data-reset="all" title="把這段的所有編輯清掉，回到原始聲音">全部</button>
+		</div>
+		<button id="clear-sel" title="取消選取（Esc）">取消選取</button>
+	</footer>
+
+
+	<div id="drop-hint">放開以載入</div>
+	<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+import puppeteer from 'puppeteer';
+const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+const page = await browser.newPage();
+const logs = [];
+page.on('console', m => logs.push(`[${m.type()}] ${m.text()}`));
+page.on('pageerror', e => logs.push(`[pageerror] ${e.message}`));
+page.on('requestfailed', r => logs.push(`[reqfail] ${r.url()} :: ${r.failure()?.errorText}`));
+page.on('response', r => { if (r.status() >= 400) logs.push(`[${r.status()}] ${r.url()}`); });
+page.on('workercreated', w => logs.push(`[worker+] ${w.url()}`));
+await page.goto('http://localhost:5180/?autoload=/Vocal.wav', { waitUntil: 'domcontentloaded' });
+await new Promise(r => setTimeout(r, 20000));
+console.log('status:', await page.$eval('#status', e => e.textContent));
+console.log('hint  :', await page.$eval('#hint', e => e.textContent));
+console.log('\n--- 事件 ---');
+logs.filter(l => !l.includes('favicon')).forEach(l => console.log(l));
+await browser.close();

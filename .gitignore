@@ -1,0 +1,17 @@
+node_modules/
+dist/
+
+# npm run release 產生的離線安裝包
+/release/
+
+# spike 的試聽檔是產生出來的（53MB），要的話跑 node spike/make-listen.mjs 重新產生
+spike/out/
+
+# 開發時的暫存
+*.log
+.DS_Store
+
+# 測試素材：人聲乾聲，28MB，而且通常是有版權的錄音。
+# npm run verify 和網址參數 ?autoload=/Vocal.wav 會用到它，
+# 但不放進版本控制——要用的話自己放一個同名檔案到專案根目錄。
+/Vocal.wav
