@@ -3,6 +3,7 @@ import { ViewState } from './view/viewstate';
 import { WaveformView, RefWaveformView, drawOverview } from './view/waveform';
 import { RangeBar } from './view/rangebar';
 import { PianoRollView } from './view/pianoroll';
+import { KEY_MODES, KEY_OPTIONS } from './model/keys';
 import { Player } from './engine/player';
 import { Renderer } from './engine/renderer';
 import { detectPitch } from './analysis/pitch';
@@ -13,6 +14,10 @@ import { History } from './model/history';
 import { TimeMap } from './model/timemap';
 import { encodeWav24, downloadBlob } from './audio/wav';
 import { serialize, deserialize, type BackgroundSettings } from './model/project';
+import { ProgressView, type ProgressTask } from './ui/progress';
+import { bindZoomGesture } from './ui/zoom-gesture';
+import { DetectionBar } from './ui/detection-bar';
+import { ComputeModeControl } from './ui/compute-mode';
 
 const el = {
 	file: document.getElementById('file') as HTMLInputElement,
@@ -25,6 +30,7 @@ const el = {
 	waveform: document.getElementById('waveform') as HTMLCanvasElement,
 	pianoroll: document.getElementById('pianoroll') as HTMLCanvasElement,
 	pianoKeys: document.getElementById('piano-keys')!,
+	keyFilter: document.getElementById('key-filter') as HTMLSelectElement,
 	hint: document.getElementById('hint')!,
 	panel: document.getElementById('panel')!,
 	selInfo: document.getElementById('sel-info')!,
@@ -38,8 +44,6 @@ const el = {
 	formantOut: document.getElementById('formant-out')!,
 	modeVoice: document.getElementById('mode-voice') as HTMLButtonElement,
 	modeInstrument: document.getElementById('mode-instrument') as HTMLButtonElement,
-	progress: document.getElementById('progress')!,
-	progressBar: document.getElementById('progress-bar')!,
 	penOpts: document.getElementById('pen-opts')!,
 	hbar: document.getElementById('hbar')!,
 	vbar: document.getElementById('vbar')!,
@@ -84,9 +88,24 @@ const view = new ViewState();
 const waveform = new WaveformView(el.waveform, view);
 const refWave = new RefWaveformView(el.refwave, view);
 const pianoroll = new PianoRollView(el.pianoroll, view, el.pianoKeys);
+for (const mode of KEY_MODES) {
+	const group = document.createElement('optgroup');
+	group.label = mode.label;
+	for (const key of KEY_OPTIONS.filter(key => key.mode === mode.id)) {
+		group.appendChild(new Option(key.label, key.id));
+	}
+	el.keyFilter.appendChild(group);
+}
+el.keyFilter.addEventListener('change', () => {
+	pianoroll.setKeyFilter(KEY_OPTIONS.find(key => key.id === el.keyFilter.value) ?? null);
+	updateDetectionStatus();
+});
 const player = new Player();
 const renderer = new Renderer();
 const history = new History();
+const progressView = new ProgressView(document.getElementById('progress')!);
+let renderProgress: ProgressTask | null = null;
+let backgroundTask: ProgressTask | null = null;
 
 let source: Source | null = null;
 let track: PitchTrack | null = null;
@@ -94,6 +113,12 @@ let curves: Curves | null = null;
 let selection: { start: number; end: number } | null = null;
 let baseInfo = '';
 let busy = false;
+const computeControl = new ComputeModeControl(
+	document.getElementById('compute-mode') as HTMLSelectElement,
+	document.getElementById('compute-status')!,
+	() => progressView.isBusy || busy,
+);
+progressView.onBusyChange = () => computeControl.sync();
 let tool: 'select' | 'pen' = 'select';
 /** 正在算繪的時間範圍（秒）。畫在兩個 canvas 上，讓使用者看得到「是這一段在跑」 */
 let renderingRange: { start: number; end: number } | null = null;
@@ -147,6 +172,22 @@ function outDuration(): number {
 	return curves ? curves.timeMap.srcToOut(source.duration) : source.duration;
 }
 
+const detectionStatus = document.getElementById('detection-status')!;
+const detectionBar = new DetectionBar(document.getElementById('detection-bar')!, view, outDuration, range => {
+	pianoroll.detectionRange = range;
+	updateDetectionStatus(range);
+});
+function updateDetectionStatus(range = detectionBar.range) {
+	const key = KEY_OPTIONS.find(key => key.id === el.keyFilter.value);
+	detectionStatus.textContent = range
+		? `${fmtTime(range.start)} ~ ${fmtTime(range.end)} · ${key ? `${key.label} 檢測中` : '選擇 Key 啟用檢測'}`
+		: '拖曳下方檢測 bar 設定範圍';
+}
+document.getElementById('detection-all')!.addEventListener('click', () => {
+	if (source) detectionBar.set({ start: 0, end: outDuration() });
+});
+document.getElementById('detection-clear')!.addEventListener('click', () => detectionBar.set(null));
+
 /** 目前被選取的錨點（id）。Shift+點擊可以多選；拖曳時一起移動，按 Delete 一起刪掉 */
 const selectedAnchors = new Set<number>();
 
@@ -159,23 +200,36 @@ const selectedAnchors = new Set<number>();
 let progressTicks = 0;   // 測試用：確認進度真的有回報，不是只有一個假的進度條
 renderer.onProgress = f => {
 	progressTicks++;
-	el.progressBar.style.width = `${(f * 100).toFixed(1)}%`;
+	renderProgress?.update('音訊算繪中', f);
 };
 function showProgress(range: { start: number; end: number } | null) {
 	renderingRange = range;
-	el.progress.hidden = !range;
-	if (range) el.progressBar.style.width = '0%';
+	if (range) {
+		renderProgress?.finish('上一項算繪已結束');
+		renderProgress = progressView.begin('音訊算繪中');
+		renderProgress.update('音訊算繪中', 0);
+	}
+}
+function finishRenderProgress(label: string, error = false) {
+	renderProgress?.finish(label, error);
+	renderProgress = null;
 }
 const hint = (msg: string) => { el.hint.textContent = msg; };
 
 // ── 載入 ────────────────────────────────────────────────────────────────
 
 async function load(file: File) {
+	const computeMode = computeControl.mode;
+	computeControl.start();
+	detectionBar.set(null);
+	const progress = progressView.begin('讀取音檔');
 	status(`解碼 ${file.name}…`);
 	try {
-		source = await decodeFile(file);
+		source = await decodeFile(file, (stage, fraction) => progress.update(stage, fraction));
 	} catch (e) {
 		status(`解不開這個檔案：${(e as Error).message}`);
+		progress.finish(`讀取失敗：${(e as Error).message}`, true);
+		computeControl.finish(false);
 		return;
 	}
 
@@ -185,8 +239,16 @@ async function load(file: File) {
 
 	// Δ 全為 0 時算繪輸出等於輸入，所以一開始不用整段算繪，直接用原始音訊。
 	// 只有被編輯過的區域才需要進 Rubber Band。
-	await renderer.init(source.channels, source.sampleRate);
-	player.setAudio(renderer.rendered, source.sampleRate);
+	progress.update('初始化音訊引擎');
+	try {
+		await renderer.init(source.channels, source.sampleRate);
+		player.setAudio(renderer.rendered, source.sampleRate);
+	} catch (e) {
+		status(`音訊引擎初始化失敗：${(e as Error).message}`);
+		progress.finish(`初始化失敗：${(e as Error).message}`, true);
+		computeControl.finish(false);
+		return;
+	}
 
 	el.stage.hidden = false;
 	el.globalBar.hidden = false;
@@ -194,10 +256,16 @@ async function load(file: File) {
 
 	baseInfo = `${source.name} · ${source.sampleRate}Hz · ${fmtTime(source.duration)}`;
 	status(`${baseInfo} · 偵測音高中…`);
+	progress.update('載入音高模型');
 	try {
-		track = await detectPitch(source.mono16k, f => status(`${baseInfo} · 偵測音高中… ${(f * 100).toFixed(0)}%`));
+		track = await detectPitch(source.mono16k, f => {
+			status(`${baseInfo} · 偵測音高中… ${(f * 100).toFixed(0)}%`);
+			progress.update('分析音高', f);
+		}, stage => progress.update(stage), { mode: computeMode, onBackend: state => computeControl.report(state) });
 	} catch (e) {
 		status(`${baseInfo} · 音高偵測失敗：${(e as Error).message}`);
+		progress.finish(`音高分析失敗：${(e as Error).message}`, true);
+		computeControl.finish(false);
 		return;
 	}
 	pianoroll.setTrack(track);
@@ -213,6 +281,8 @@ async function load(file: File) {
 
 	applyDevParams();
 	status(baseInfo);
+	progress.finish('讀取與音高分析完成');
+	computeControl.finish(true);
 	hint('拖曳選取一段，用面板調整；1/2/3 切換音高・音量・Formant，B 切畫筆');
 }
 
@@ -1060,8 +1130,10 @@ el.saveBtn.addEventListener('click', () => {
 el.openProject.addEventListener('change', async () => {
 	const f = el.openProject.files?.[0];
 	if (!f || !source || !track) return;
+	const progress = progressView.begin('讀取專案');
 	try {
 		const loaded = deserialize(await f.text(), source.sampleRate, track.length);
+		progress.finish('專案讀取完成');
 		history.push(curves!);
 		curves = loaded.curves;
 		// 模式是全域設定，也要跟著專案檔回來——不然讀檔後聲音會跟存檔前不一樣
@@ -1090,8 +1162,11 @@ el.openProject.addEventListener('change', async () => {
 			refNote = `；專案有參考音軌 ${bgSaved.name}，請在下方參考音軌按「載入參考音軌」（設定會自動套用）`;
 		}
 		hint(`讀檔完成（算繪 ${((performance.now() - t0) / 1000).toFixed(1)}s）${refNote}`);
+		finishRenderProgress('專案讀取與算繪完成');
 	} catch (e) {
 		hint(`讀檔失敗：${(e as Error).message}`);
+		progress.finish(`讀檔失敗：${(e as Error).message}`, true);
+		finishRenderProgress(`讀檔失敗：${(e as Error).message}`, true);
 	} finally {
 		busy = false;
 		showProgress(null);
@@ -1124,9 +1199,11 @@ async function rerender(fromSec: number, toSec: number, label: string) {
 		await renderer.patch(curves, Math.max(0, fromSec), toSec);
 		player.setAudio(renderer.rendered, renderer.sampleRate);
 		hint(`${label}：完成（${(performance.now() - t0).toFixed(0)}ms）`);
+		finishRenderProgress(`${label}算繪完成`);
 		scheduleBackground({ from: Math.max(0, fromSec), to: toSec });
 	} catch (e) {
 		hint(`${label}：算繪失敗 ${(e as Error).message}`);
+		finishRenderProgress(`${label}算繪失敗：${(e as Error).message}`, true);
 	} finally {
 		busy = false;
 		showProgress(null);
@@ -1174,6 +1251,13 @@ function syncBackgroundStatus() {
 	const waiting = !!bgTimer && !!bgPendingRange;
 	el.bgStatus.hidden = p === null && !waiting;
 	el.bgText.textContent = p === null ? '背景精算（等待中）' : `背景精算 ${Math.round(p * 100)}%`;
+	if (p !== null || waiting) {
+		backgroundTask ??= progressView.begin('背景精算', 0);
+		backgroundTask.update(p === null ? '背景精算（等待中）' : '背景精算', p);
+	} else {
+		backgroundTask?.finish('背景精算已結束');
+		backgroundTask = null;
+	}
 }
 
 /** 等背景精算全部結束（匯出前、測試用） */
@@ -1185,22 +1269,24 @@ async function waitBackground() {
 
 // ── 時間軸操作 ──────────────────────────────────────────────────────────
 
-/**
- * 滾輪（照一般編輯器的慣例：Shift 代表「換成橫向」）：
- *   單獨          縱向捲動
- *   Ctrl/Cmd      縱向縮放
- *   Shift         橫向捲動
- *   Ctrl+Shift    橫向縮放
- *
- * 縱向的兩個是對「目前正在編輯的那條 lane」作用。波形軌沒有縱軸可言，
- * 所以在那裡一律當成橫向操作——不然在波形上滾滾輪會完全沒反應，那更怪。
- */
-for (const canvas of [el.waveform, el.refwave, el.pianoroll]) {
+// 曲線區以紅色播放線縮放時間軸；琴鍵與右側捲軸以游標高度縮放縱軸。
+bindZoomGesture(el.pianoroll, factor => {
+	view.zoomAt(view.timeToX(player.position), factor, el.pianoroll.clientWidth);
+}, () => source !== null);
+for (const target of [el.pianoKeys, el.vbar]) {
+	bindZoomGesture(target, (factor, clientY) => {
+		const rect = el.pianoroll.getBoundingClientRect();
+		pianoroll.zoomV(factor, Math.max(0, Math.min(rect.height, clientY - rect.top)), rect.height);
+	}, () => source !== null);
+}
+
+// 波形軌保留原有操作：滾輪橫向捲動、Ctrl/Cmd 縮放、Alt 放大波形。
+for (const canvas of [el.waveform, el.refwave]) {
 	canvas.addEventListener('wheel', e => {
 		if (!source) return;
 		e.preventDefault();
 		const rect = canvas.getBoundingClientRect();
-		const x = e.clientX - rect.left, y = e.clientY - rect.top;
+		const x = e.clientX - rect.left;
 		const w = canvas.clientWidth;
 		// 有些滑鼠與觸控板把 Shift+滾輪直接送成 deltaX，兩個都要看
 		const d = e.deltaY !== 0 ? e.deltaY : e.deltaX;
@@ -1214,17 +1300,8 @@ for (const canvas of [el.waveform, el.refwave, el.pianoroll]) {
 			setRefAmpZoom(refWave.ampZoom * Math.exp(-d * 0.002));
 			return;
 		}
-		// 觸控板的橫向滑動本來就是 deltaX，不必按 Shift 也該當成橫向
-		const horizontal = e.shiftKey || canvas !== el.pianoroll || (e.deltaX !== 0 && e.deltaY === 0);
-
-		if (horizontal) {
-			if (ctrl) view.zoomAt(x, Math.exp(d * 0.003), w);
-			else view.scrollBy(d, w);
-			return;
-		}
-		const h = el.pianoroll.clientHeight;
-		if (ctrl) pianoroll.zoomV(Math.exp(d * 0.003), y, h);
-		else pianoroll.scrollV(d * 0.5, h);
+		if (ctrl) view.zoomAt(x, Math.exp(d * 0.003), w);
+		else view.scrollBy(d, w);
 	}, { passive: false });
 }
 
@@ -1353,12 +1430,14 @@ function syncRefUi() {
 }
 
 async function loadReference(file: File) {
+	const progress = progressView.begin('讀取參考音軌');
 	hint(`載入參考音軌 ${file.name}…`);
 	let audio;
 	try {
-		audio = await decodeAudio(file);
+		audio = await decodeAudio(file, (stage, fraction) => progress.update(`參考音軌：${stage}`, fraction));
 	} catch (e) {
 		hint(`解不開參考音檔：${(e as Error).message}`);
+		progress.finish(`參考音軌讀取失敗：${(e as Error).message}`, true);
 		return;
 	}
 	player.setBackground(audio.channels, audio.sampleRate);
@@ -1371,6 +1450,7 @@ async function loadReference(file: File) {
 		pendingRefSettings = null;
 	}
 	applyRefToPlayer();
+	progress.finish('參考音軌讀取完成');
 	const mainDur = outDuration();
 	hint(source && Math.abs(audio.duration - mainDur) > 0.5
 		? `參考音軌 ${fmtTime(audio.duration)} / 主唱 ${fmtTime(mainDur)}，長度不同，可能要調 offset`
@@ -1775,6 +1855,7 @@ function editedPitchIn(fromSec: number, toSec: number): number[] | null {
 // ── 畫面更新 ────────────────────────────────────────────────────────────
 
 function frame() {
+	computeControl.sync();
 	if (source) {
 		const pos = player.position;
 		el.clock.textContent = fmtTime(pos);
@@ -1785,6 +1866,7 @@ function frame() {
 		waveform.draw(pos, selection, curves, loop, renderingRange, selectedAnchors);
 		refWave.draw(pos, selection, loop);
 		pianoroll.draw(pos, selection, curves, loop, renderingRange, selectedAnchors);
+		detectionBar.sync();
 		hbar.sync();
 		vbar.sync();
 	}

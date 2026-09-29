@@ -36,12 +36,13 @@
 		<a id="help-link" href="https://code.wiwi.blog/wiwi/WiPitch" target="_blank" rel="noopener" title="使用說明與原始碼" aria-label="使用說明與原始碼">?</a>
 	</header>
 
-	<div id="progress" hidden><div id="progress-bar"></div></div>
-
 	<main id="stage" hidden>
 		<div class="track" id="pitch-track">
 			<div id="pitch-toolbar">
-				<!-- 左半邊：選取工具且有選取 → 參數面板；畫筆工具 → 畫筆選項；其他 → 空 -->
+				<label id="key-filter-control" title="調外音的琴鍵顯示灰白；僅影響音高對照顯示">
+					Key <select id="key-filter" aria-label="調性 Key 過濾器"><option value="">全部音</option></select>
+				</label>
+				<!-- 第二列：選取工具且有選取 → 參數面板；畫筆工具 → 畫筆選項；其他 → 隱藏 -->
 				<div class="pen-opts" id="pen-opts" hidden>
 					<span class="group">
 						<label class="sw" title="畫出來的線要自動加抖音（V）">
@@ -101,6 +102,12 @@
 					</div>
 				</div>
 			</div>
+			<div id="detection-tools">
+				<span id="detection-status">拖曳下方檢測 bar 設定範圍</span>
+				<button id="detection-all" type="button">檢測全段</button><button id="detection-clear" type="button">清除檢測</button>
+				<span class="detection-legend" title="以修改後音高與最近調內音比較；與兩個調內音等距時採較低音作基準"><span class="near">原色：偏差 &lt;50 cents</span> · <span class="sharp">紅：偏高 ≥50</span> · <span class="flat">綠：偏低 ≥50</span></span>
+			</div>
+			<div id="detection-row"><span>檢測</span><div id="detection-bar" aria-label="獨立音高檢測範圍" title="拖曳空白處圈選；拖左右端點調整、拖中間移動範圍；端點可用左右方向鍵調整"></div></div>
 			<div id="pianoroll-wrap">
 				<div id="piano-keys" role="img" aria-label="鋼琴音高對照：高音在上、低音在下，中央 Do 為 C4" title="鋼琴音高對照 · 中央 Do = C4"></div>
 				<canvas id="pianoroll"></canvas>
@@ -161,6 +168,16 @@
 		<button id="clear-sel" title="取消選取（Esc）">取消選取</button>
 	</footer>
 
+	<div id="progress" aria-busy="false">
+		<div id="compute-control">
+			<label for="compute-mode">音高運算</label>
+			<select id="compute-mode"><option value="gpu">GPU 優先</option><option value="wasm">CPU（WASM）</option></select>
+			<span id="compute-status" role="status">下次分析：GPU 優先</span>
+		</div>
+		<label id="progress-label" for="progress-bar" role="status">等待載入音檔</label>
+		<progress id="progress-bar" max="1" value="0" aria-describedby="progress-value"></progress>
+		<span id="progress-value" class="progress-value">0%</span>
+	</div>
 
 	<div id="drop-hint">放開以載入</div>
 	<script type="module" src="/src/main.ts"></script>

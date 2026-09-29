@@ -140,18 +140,41 @@ main { flex: 1; display: grid; grid-template-rows: 1fr 18px 6px var(--wave-h, 15
 body.dragging #drop-hint { display: grid; }
 
 /*
- * automation 區頂端的工具列：左邊參數面板、右邊工具與 lane 切換。
- * 以前兩者都浮在 canvas 上，視窗一窄就互相重疊；現在是真的佔一列，
- * 寬度不夠時右邊那組保持在第一行，左邊的參數面板自己折成多行，永遠不會遮住彼此或曲線。
+ * automation 工具列：第一列左邊調性、右邊工具與 lane 切換。
+ * 選取參數與畫筆選項另佔下一列；窄視窗允許折行，避免遮住彼此或曲線。
  */
 #pitch-track { display: flex; flex-direction: column; }
 #pitch-toolbar {
 	flex: 0 0 auto;
-	display: flex; flex-wrap: nowrap; justify-content: space-between; align-items: flex-start;
+	display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start;
 	gap: 4px 12px; padding: 3px 8px;
 	background: var(--panel); border-bottom: 1px solid var(--line);
 }
 #pianoroll-wrap { position: relative; flex: 1; min-height: 0; }
+#detection-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 3px 8px; font-size: 11px; background: var(--panel); }
+#detection-tools button { font-size: 11px; padding: 2px 6px; }
+.detection-legend { margin-left: auto; }
+.detection-legend .near { color: #5ac8fa; }
+.detection-legend .sharp { color: #ff6b6b; }
+.detection-legend .flat { color: #65d68c; }
+#detection-row { position: relative; flex: 0 0 24px; background: #171b21; border-bottom: 1px solid var(--line); }
+#detection-row > span { display: block; width: var(--piano-key-width); text-align: center; font-size: 11px; line-height: 24px; color: var(--dim); }
+#detection-bar { position: absolute; left: var(--piano-key-width); right: 14px; top: 2px; bottom: 2px; overflow: hidden; background: #252d38; cursor: crosshair; touch-action: none; }
+.detection-thumb { position: absolute; top: 0; bottom: 0; background: #5ac8fa40; border: 1px solid #5ac8fa; cursor: grab; min-width: 2px; }
+.detection-thumb button { position: absolute; top: -1px; bottom: -1px; width: 9px; padding: 0; background: #84d4fa; border: 1px solid #b6e6fc; border-radius: 2px; cursor: ew-resize; }
+.detection-thumb [data-edge="start"] { left: 0; }
+.detection-thumb [data-edge="end"] { right: 0; }
+#key-filter-control {
+	display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+	margin-left: calc(var(--piano-key-width) - 8px); font-size: 12px;
+}
+#key-filter {
+	width: 152px; min-height: 26px; padding: 2px 6px; font: inherit;
+	color: var(--text); background: #252b34; border: 1px solid #485362; border-radius: 4px;
+	color-scheme: dark;
+}
+#key-filter:focus-visible { outline: 2px solid #5ac8fa; outline-offset: 1px; }
+#pitch-toolbar > #panel, #pitch-toolbar > .pen-opts { order: 1; flex-basis: 100%; }
 #pianoroll-wrap canvas { position: absolute; top: 0; left: var(--piano-key-width); display: block; width: calc(100% - 14px - var(--piano-key-width)); height: 100%; }
 /* 琴鍵獨立於可編輯的時間軸，避免遮住音檔開頭或把點琴鍵誤判成編輯。 */
 #piano-keys {
@@ -175,6 +198,10 @@ body.dragging #drop-hint { display: grid; }
 }
 .piano-key.black span { right: 4px; color: #d8dee9; }
 .piano-key.octave span { color: #136583; font-weight: 700; }
+.piano-key.out-of-key {
+	background: #bfc3c8; border-color: #a8adb4; box-shadow: none;
+}
+.piano-key.out-of-key span { color: #737b85; font-weight: 400; }
 #wave-track::before, #ref-track::before {
 	position: absolute; inset: 0 auto 0 0; width: var(--piano-key-width);
 	display: grid; place-items: center; background: var(--panel);
@@ -267,8 +294,30 @@ body.dragging #drop-hint { display: grid; }
 #bg-status .dot { width: 7px; height: 7px; border-radius: 50%; background: #ffd166; animation: bg-pulse 1s ease-in-out infinite; }
 @keyframes bg-pulse { 50% { opacity: 0.3; } }
 
-#progress { height: 2px; background: var(--line); flex: 0 0 auto; }
-#progress-bar { height: 100%; width: 0; background: var(--accent); transition: width 0.1s linear; }
+#progress {
+	margin-top: auto; flex: 0 0 auto; display: flex; align-items: center; gap: 12px;
+	padding: 8px 16px; min-height: 36px; border-top: 1px solid var(--line);
+	background: var(--panel); font-size: 12px;
+}
+#progress-label { flex: 0 1 280px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#compute-control { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; padding-right: 12px; border-right: 1px solid var(--line); }
+#compute-mode { color-scheme: dark; color: var(--text); background: #252b34; border: 1px solid #485362; border-radius: 4px; padding: 3px; font: inherit; }
+#compute-mode:disabled { opacity: .55; cursor: wait; }
+#compute-status { color: var(--dim); font-size: 11px; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 850px) {
+	#progress { flex-wrap: wrap; gap: 6px 10px; }
+	#compute-control { flex-basis: 100%; border-right: 0; }
+}
+#progress-bar { flex: 1; min-width: 40px; height: 8px; border: 0; border-radius: 4px; overflow: hidden; appearance: none; background: var(--line); accent-color: var(--accent); }
+#progress-bar::-webkit-progress-bar { background: var(--line); border-radius: 4px; }
+#progress-bar::-webkit-progress-value { background: var(--accent); border-radius: 4px; transition: width 0.15s linear; }
+#progress-bar::-moz-progress-bar { background: var(--accent); border-radius: 4px; }
+#progress-bar:indeterminate { background: linear-gradient(90deg, var(--line) 25%, var(--accent-dim) 50%, var(--line) 75%); background-size: 200% 100%; animation: progress-pulse 1.5s linear infinite; }
+#progress-bar:indeterminate::-webkit-progress-bar { background: transparent; }
+.progress-value { flex: 0 0 58px; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
+#progress.error #progress-label, #progress.error .progress-value { color: #ff8585; }
+@keyframes progress-pulse { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { #progress-bar:indeterminate { animation: none; } }
 
 /* 畫筆選項：跟參數面板佔同一個位置（工具列左半邊），空間不夠時一組一組折行 */
 .pen-opts {

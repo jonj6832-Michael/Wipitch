@@ -10,6 +10,9 @@ import { frameTime, hzToMidi, midiToName, type PitchTrack } from '../analysis/sw
 import { Curves, LANES, CURVE_HOP_SEC, CURVE_SUB, upsample, upsampleVoiced, type LaneId } from '../model/curves';
 import type { ViewState } from './viewstate';
 import type { TimeMap } from '../model/timemap';
+import { isInKey, type KeySignature } from '../model/keys';
+import { pitchDeviation } from '../model/pitch-deviation';
+import type { DetectionRange } from '../ui/detection-bar';
 
 const isBlackKey = (midi: number) => [1, 3, 6, 8, 10].includes(((midi % 12) + 12) % 12);
 
@@ -40,6 +43,14 @@ export class PianoRollView {
 	active: LaneId = 'pitch';
 
 	private keyboardLayout = '';
+	private keyFilter: KeySignature | null = null;
+	detectionRange: DetectionRange | null = null;
+
+	setKeyFilter(key: KeySignature | null) {
+		this.keyFilter = key;
+		this.keyboardLayout = '';
+		this.keyboard.setAttribute('aria-label', `鋼琴音高對照：${key?.label ?? '全部音'}，調外音顯示灰白；中央 Do 為 C4`);
+	}
 
 	constructor(private canvas: HTMLCanvasElement, private view: ViewState, private keyboard: HTMLElement) {
 		this.ctx = canvas.getContext('2d')!;
@@ -285,7 +296,7 @@ export class PianoRollView {
 				if (curves && hasEdits(curves.pitch)) {
 					this.drawContour(w, h, null, 'rgba(216, 222, 233, 0.22)', 1.5, map);
 				}
-				this.drawContour(w, h, curves, LANES.pitch.color, 2, map);
+				this.drawContour(w, h, curves, LANES.pitch.color, 2, map, true);
 			}
 		} else {
 			this.drawFlatLane(w, h, id, curves);
@@ -367,8 +378,10 @@ export class PianoRollView {
 			if (bottom <= 0 || top >= h) continue;
 			const key = document.createElement('div');
 			key.className = `piano-key ${black ? 'black' : 'white'}${octave ? ' octave' : ''}`;
+			const inKey = isInKey(m, this.keyFilter);
+			key.classList.toggle('out-of-key', !inKey);
 			key.dataset.midi = String(m);
-			key.title = midiToName(m);
+			key.title = midiToName(m) + (this.keyFilter ? ` · ${this.keyFilter.label} · ${inKey ? '調內音' : '調外音'}` : '');
 			key.style.top = `${top}px`;
 			key.style.height = `${bottom - top}px`;
 			if (step >= 14 || (octave && step >= 7)) {
@@ -414,7 +427,7 @@ export class PianoRollView {
 	 *
 	 * 未發聲的格子要把線斷開，不能硬連——不然休止符處會出現一條橫跨的假線。
 	 */
-	private drawContour(w: number, h: number, curves: Curves | null, color: string, width: number, map: TimeMap | null) {
+	private drawContour(w: number, h: number, curves: Curves | null, color: string, width: number, map: TimeMap | null, detect = false) {
 		const { ctx, view, track } = this;
 		if (!track) return;
 		// 音高格子在原始時間，畫面是輸出時間
@@ -439,20 +452,42 @@ export class PianoRollView {
 		ctx.beginPath();
 
 		let drawing = false;
+		const range = detect && this.keyFilter ? this.detectionRange : null;
+		let previous: { t: number; midi: number; x: number; y: number } | null = null;
+		let strokeColor = color;
 		for (let i = i0; i < i1; i += fine ? stride : 1) {
 			let t: number, midi: number;
 			if (fine) {
-				if (!this.fineVoiced![i]) { drawing = false; continue; }
+				if (!this.fineVoiced![i]) { drawing = false; previous = null; continue; }
 				t = frameTime(i / CURVE_SUB);
 				midi = this.fineMidi![i] + curves!.pitch[i];
 			} else {
-				if (!track.voiced[i]) { drawing = false; continue; }
+				if (!track.voiced[i]) { drawing = false; previous = null; continue; }
 				t = frameTime(i);
 				midi = hzToMidi(track.f0[i]) + (curves ? curves.pitch[i * CURVE_SUB] : 0);
 			}
-			const x = view.timeToX(srcToOut(t)), y = this.midiToY(midi, h);
+			const outTime = srcToOut(t);
+			const x = view.timeToX(outTime), y = this.midiToY(midi, h);
+			if (range && previous) {
+				// 精確切開範圍邊界，避免把範圍外的線段一併染色。
+				const cuts = [previous.t, ...[range.start, range.end].filter(b => b > previous!.t && b < outTime), outTime];
+				for (let j = 1; j < cuts.length; j++) {
+					const mid = (cuts[j - 1] + cuts[j]) / 2;
+					const fraction = (mid - previous.t) / Math.max(1e-12, outTime - previous.t);
+					const deviation = mid >= range.start && mid <= range.end
+						? pitchDeviation(previous.midi + (midi - previous.midi) * fraction, this.keyFilter) : null;
+					const nextColor = deviation?.direction === 'sharp' ? '#ff6b6b' : deviation?.direction === 'flat' ? '#65d68c' : color;
+					const at = (time: number) => ({ x: view.timeToX(time), y: previous!.y + (y - previous!.y) * (time - previous!.t) / Math.max(1e-12, outTime - previous!.t) });
+					if (nextColor !== strokeColor) {
+						ctx.stroke(); ctx.beginPath(); ctx.strokeStyle = strokeColor = nextColor;
+						const p = at(cuts[j - 1]); ctx.moveTo(p.x, p.y);
+					}
+					const p = at(cuts[j]); ctx.lineTo(p.x, p.y);
+				}
+			} else
 			if (!drawing) { ctx.moveTo(x, y); drawing = true; }
 			else ctx.lineTo(x, y);
+			previous = { t: outTime, midi, x, y };
 		}
 		ctx.stroke();
 	}

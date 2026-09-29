@@ -49,6 +49,8 @@ export class RangeBar {
 		root.addEventListener('pointercancel', e => this.up(e));
 		root.addEventListener('dblclick', () => this.src.fit());
 		root.addEventListener('wheel', e => {
+			// A region-specific zoom handler may have already handled this wheel.
+			if (e.defaultPrevented) return;
 			e.preventDefault();
 			const vis = this.src.visible();
 			const d = e.deltaY !== 0 ? e.deltaY : e.deltaX;

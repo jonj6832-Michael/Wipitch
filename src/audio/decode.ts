@@ -16,20 +16,37 @@ export interface Source {
 /** SwiftF0 的工作取樣率。所有音高分析都在這個取樣率上做。 */
 export const ANALYSIS_RATE = 16000;
 
-export async function decodeFile(file: File): Promise<Source> {
-	const bytes = await file.arrayBuffer();
+export type DecodeProgress = (stage: string, fraction: number | null) => void;
+
+function readAudioFile(file: File, onProgress?: DecodeProgress): Promise<ArrayBuffer> {
+	onProgress?.('讀取音檔', 0);
+	return new Promise((resolve, reject) => {
+		const reader = new FileReader();
+		reader.onprogress = e => onProgress?.('讀取音檔', e.lengthComputable && e.total > 0 ? e.loaded / e.total : null);
+		reader.onload = () => { onProgress?.('讀取音檔', 1); resolve(reader.result as ArrayBuffer); };
+		reader.onerror = () => reject(reader.error ?? new Error('音檔讀取失敗'));
+		reader.onabort = () => reject(new Error('音檔讀取已取消'));
+		reader.readAsArrayBuffer(file);
+	});
+}
+
+export async function decodeFile(file: File, onProgress?: DecodeProgress): Promise<Source> {
+	const bytes = await readAudioFile(file, onProgress);
 
 	// 用一個暫時的 AudioContext 解碼。瀏覽器原生解碼器支援 wav/mp3/flac/m4a 等格式，
 	// 比自己寫解析器可靠得多。
 	const ctx = new AudioContext();
-	const buffer = await ctx.decodeAudioData(bytes);
-	await ctx.close();
+	onProgress?.('解碼音訊', null);
+	let buffer: AudioBuffer;
+	try { buffer = await ctx.decodeAudioData(bytes); }
+	finally { await ctx.close(); }
 
 	const channels: Samples[] = [];
 	for (let c = 0; c < buffer.numberOfChannels; c++) {
 		channels.push(buffer.getChannelData(c).slice() as Samples);
 	}
 
+	onProgress?.('準備分析音訊', null);
 	return {
 		name: file.name,
 		channels,
@@ -40,10 +57,13 @@ export async function decodeFile(file: File): Promise<Source> {
 }
 
 /** 只解碼聲道，不做音高分析用的 16kHz 版本。背景參考音軌用這個。 */
-export async function decodeAudio(file: File): Promise<{ name: string; channels: Samples[]; sampleRate: number; duration: number }> {
+export async function decodeAudio(file: File, onProgress?: DecodeProgress): Promise<{ name: string; channels: Samples[]; sampleRate: number; duration: number }> {
+	const bytes = await readAudioFile(file, onProgress);
 	const ctx = new AudioContext();
-	const buffer = await ctx.decodeAudioData(await file.arrayBuffer());
-	await ctx.close();
+	onProgress?.('解碼音訊', null);
+	let buffer: AudioBuffer;
+	try { buffer = await ctx.decodeAudioData(bytes); }
+	finally { await ctx.close(); }
 	const channels: Samples[] = [];
 	for (let c = 0; c < buffer.numberOfChannels; c++) channels.push(buffer.getChannelData(c).slice() as Samples);
 	return { name: file.name, channels, sampleRate: buffer.sampleRate, duration: buffer.duration };
