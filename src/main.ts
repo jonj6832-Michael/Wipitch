@@ -1943,6 +1943,7 @@ aiButton.addEventListener('click', async () => {
 	const settings = { ...aiSettings.settings };
 	const controller = new AbortController(); aiAbort = controller;
 	aiWorking = busy = true;
+	aiButton.setAttribute('aria-busy', 'true');
 	player.pause(); syncPlayButton();
 	const header = document.querySelector('header')!;
 	header.inert = el.stage.inert = el.globalBar.inert = true;
@@ -1981,6 +1982,7 @@ aiButton.addEventListener('click', async () => {
 		task.finish(aiStatus.textContent, !controller.signal.aborted);
 	} finally {
 		aiAbort = null; aiWorking = busy = false;
+		aiButton.setAttribute('aria-busy', 'false');
 		header.inert = el.stage.inert = el.globalBar.inert = false;
 		aiCancel.hidden = true;
 		syncAIControls();

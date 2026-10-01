@@ -39,6 +39,7 @@ body { display: flex; flex-direction: column; }
 #ai-strength { width: 110px; accent-color: var(--accent); }
 #ai-strength-value { min-width: 42px; font-variant-numeric: tabular-nums; }
 #ai-correct { border-color: var(--accent-dim); }
+#ai-correct[aria-busy="true"] { border-color: var(--accent); background: #224858; opacity: 1; animation: activity-blink 1.2s ease-in-out infinite; }
 #ai-status { color: var(--dim); flex: 1; min-width: 160px; }
 #ai-settings-dialog { color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; width: min(540px, 94vw); max-height: 90vh; overflow: auto; padding: 24px; }
 #ai-settings-dialog::backdrop { background: #0009; }
@@ -334,13 +335,23 @@ body.dragging #drop-hint { display: grid; }
 #progress-bar::-moz-progress-bar { background: var(--accent); border-radius: 4px; }
 #progress-bar:indeterminate { background: linear-gradient(90deg, var(--line) 25%, var(--accent-dim) 50%, var(--line) 75%); background-size: 200% 100%; animation: progress-pulse 1.5s linear infinite; }
 #progress-bar:indeterminate::-webkit-progress-bar { background: transparent; }
+#progress[aria-busy="true"] #progress-bar { animation: activity-blink 1.2s ease-in-out infinite; }
+#progress[aria-busy="true"] #progress-bar:indeterminate { animation: progress-pulse 1.5s linear infinite, activity-blink 1.2s ease-in-out infinite; }
 .progress-value { flex: 0 0 58px; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
 #progress.error #progress-label, #progress.error .progress-value { color: #ff8585; }
 #load-timings { position: relative; flex: 0 0 auto; }
 #load-timings summary { cursor: pointer; color: var(--accent); }
 #load-timings pre { position: absolute; bottom: 22px; right: 0; z-index: 20; width: min(520px, 90vw); max-height: 65vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; font: 12px/1.7 monospace; box-shadow: 0 4px 20px #0008; }
 @keyframes progress-pulse { to { background-position: -200% 0; } }
-@media (prefers-reduced-motion: reduce) { #progress-bar:indeterminate { animation: none; } }
+@keyframes activity-blink {
+	0%, 100% { opacity: 1; filter: brightness(1.2); }
+	50% { opacity: .45; filter: brightness(.85); }
+}
+@media (prefers-reduced-motion: reduce) {
+	#ai-correct[aria-busy="true"], #progress[aria-busy="true"] #progress-bar,
+	#progress[aria-busy="true"] #progress-bar:indeterminate, #progress-bar:indeterminate { animation: none; }
+	#ai-correct[aria-busy="true"], #progress[aria-busy="true"] #progress-bar { box-shadow: 0 0 0 2px var(--accent-dim); }
+}
 
 /* 畫筆選項：跟參數面板佔同一個位置（工具列左半邊），空間不夠時一組一組折行 */
 .pen-opts {
