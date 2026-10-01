@@ -19,6 +19,7 @@ import { bindZoomGesture } from './ui/zoom-gesture';
 import { DetectionBar } from './ui/detection-bar';
 import { ComputeModeControl } from './ui/compute-mode';
 import { bindPianoAudition } from './ui/piano-audition';
+import { LoadGuard, LoadTimings, analyseSource } from './loading';
 
 const el = {
 	file: document.getElementById('file') as HTMLInputElement,
@@ -222,72 +223,102 @@ bindPianoAudition(el.pianoKeys, midi => pianoroll.setPressedMidi(midi), error =>
 
 // ── 載入 ────────────────────────────────────────────────────────────────
 
+const loadGuard = new LoadGuard();
+const loadTimingsPanel = document.getElementById('load-timings') as HTMLDetailsElement;
 async function load(file: File) {
+	const accepted = await loadGuard.run(() => loadOnce(file), busy => {
+		el.file.disabled = busy;
+		el.file.closest('label')?.classList.toggle('file-busy', busy);
+		if (!busy) el.file.value = ''; // 失敗後可重新選取同一檔案。
+	});
+	if (!accepted) hint('音檔讀取或分析中，請等完成後再開啟另一個音檔。');
+}
+
+async function loadOnce(file: File) {
+	const timings = new LoadTimings();
+	let success = false, releasedBytes = 0;
+	let failureLabel = '讀取失敗';
 	const computeMode = computeControl.mode;
 	computeControl.start();
 	detectionBar.set(null);
 	const progress = progressView.begin('讀取音檔');
+	loadTimingsPanel.hidden = true;
+	loadTimingsPanel.open = false;
 	status(`解碼 ${file.name}…`);
 	try {
-		source = await decodeFile(file, (stage, fraction) => progress.update(stage, fraction));
-	} catch (e) {
-		status(`解不開這個檔案：${(e as Error).message}`);
-		progress.finish(`讀取失敗：${(e as Error).message}`, true);
-		computeControl.finish(false);
-		return;
-	}
+		source = await decodeFile(file, (stage, fraction) => {
+			timings.stage(stage);
+			progress.update(stage, fraction);
+		});
 
-	view.duration = source.duration;
-	view.fit(el.waveform.clientWidth || 1200);
-	waveform.setSource(source);
+		failureLabel = '初始化失敗';
+		timings.stage('建立波形');
+		view.duration = source.duration;
+		view.fit(el.waveform.clientWidth || 1200);
+		waveform.setSource(source);
 
-	// Δ 全為 0 時算繪輸出等於輸入，所以一開始不用整段算繪，直接用原始音訊。
-	// 只有被編輯過的區域才需要進 Rubber Band。
-	progress.update('初始化音訊引擎');
-	try {
+		// 中性音訊不需整段算繪，只有被編輯過的區域才需要進 Rubber Band。
+		progress.update('初始化音訊引擎');
+		timings.stage('初始化編輯引擎');
 		await renderer.init(source.channels, source.sampleRate);
+		timings.stage('初始化播放器');
 		player.setAudio(renderer.rendered, source.sampleRate);
-	} catch (e) {
-		status(`音訊引擎初始化失敗：${(e as Error).message}`);
-		progress.finish(`初始化失敗：${(e as Error).message}`, true);
-		computeControl.finish(false);
-		return;
-	}
 
-	el.stage.hidden = false;
-	el.globalBar.hidden = false;
-	el.play.disabled = el.stop.disabled = false;
+		el.stage.hidden = false;
+		el.globalBar.hidden = false;
+		el.play.disabled = el.stop.disabled = false;
 
-	baseInfo = `${source.name} · ${source.sampleRate}Hz · ${fmtTime(source.duration)}`;
-	status(`${baseInfo} · 偵測音高中…`);
-	progress.update('載入音高模型');
-	try {
-		track = await detectPitch(source.mono16k, f => {
+		baseInfo = `${source.name} · ${source.sampleRate}Hz · ${fmtTime(source.duration)}`;
+		status(`${baseInfo} · 偵測音高中…`);
+		failureLabel = '音高分析失敗';
+		progress.update('載入音高模型');
+		timings.stage('啟動音高分析 Worker 與傳輸音訊');
+		let backendLabel = computeMode === 'gpu' ? 'GPU 優先' : 'CPU';
+		const result = await analyseSource(source, audio => detectPitch(audio, f => {
 			status(`${baseInfo} · 偵測音高中… ${(f * 100).toFixed(0)}%`);
 			progress.update('分析音高', f);
-		}, stage => progress.update(stage), { mode: computeMode, onBackend: state => computeControl.report(state) });
+		}, stage => {
+			timings.stage(stage === '分析音高' ? `分析音高（${backendLabel}）` : stage);
+			progress.update(stage);
+		}, { mode: computeMode, onBackend: state => {
+			backendLabel = state.backend === 'webgpu' ? 'WebGPU + WASM' : 'CPU / WASM';
+			computeControl.report(state);
+		} }));
+		track = result.track;
+		releasedBytes = result.releasedBytes;
+		timings.stage('準備編輯曲線');
+		failureLabel = '音高顯示初始化失敗';
+		pianoroll.setTrack(track);
+		curves = new Curves(track.length * CURVE_SUB);
+		history.reset(curves);
+		syncRampInputs();
+
+		pitchMidi = upsample(track.f0.map(hzToMidi));
+		curveVoiced = upsampleVoiced(track.voiced);
+		pitchMidiFilled = fillGaps(pitchMidi, curveVoiced, 0, pitchMidi.length);
+		el.exportBtn.disabled = el.saveBtn.disabled = false;
+		applyDevParams();
+		status(baseInfo);
+		progress.finish('讀取與音高分析完成');
+		success = true;
+		hint('拖曳選取一段，用面板調整；1/2/3 切換音高・音量・Formant，B 切畫筆');
 	} catch (e) {
-		status(`${baseInfo} · 音高偵測失敗：${(e as Error).message}`);
-		progress.finish(`音高分析失敗：${(e as Error).message}`, true);
-		computeControl.finish(false);
-		return;
+		const message = `${failureLabel}：${e instanceof Error ? e.message : String(e)}`;
+		status(message);
+		progress.finish(message, true);
+	} finally {
+		computeControl.finish(success);
+		const report = { file: file.name, fileBytes: file.size, mode: computeMode, success, releasedAnalysisBytes: releasedBytes, ...timings.finish() };
+		loadTimingsPanel.querySelector('summary')!.textContent = `載入耗時 ${(report.totalMs / 1000).toFixed(2)} 秒${success ? '' : '（失敗）'}`;
+		loadTimingsPanel.querySelector('pre')!.textContent = [
+			file.name,
+			...report.stages.map(row => `${row.stage}：${(row.ms / 1000).toFixed(3)} 秒`),
+			`已解除分析暫存引用：${(releasedBytes / 1048576).toFixed(1)} MiB`,
+			'階段耗時含等待；暫存實際回收時間由瀏覽器決定。',
+		].join('\n');
+		loadTimingsPanel.hidden = false;
+		console.info('[WiPitch] load timing', report);
 	}
-	pianoroll.setTrack(track);
-	curves = new Curves(track.length * CURVE_SUB);
-	history.reset(curves);
-	syncRampInputs();
-
-	pitchMidi = upsample(track.f0.map(hzToMidi));
-	curveVoiced = upsampleVoiced(track.voiced);
-	pitchMidiFilled = fillGaps(pitchMidi, curveVoiced, 0, pitchMidi.length);
-
-	el.exportBtn.disabled = el.saveBtn.disabled = false;
-
-	applyDevParams();
-	status(baseInfo);
-	progress.finish('讀取與音高分析完成');
-	computeControl.finish(true);
-	hint('拖曳選取一段，用面板調整；1/2/3 切換音高・音量・Formant，B 切畫筆');
 }
 
 function applyDevParams() {
@@ -308,7 +339,11 @@ if (autoload) {
 		.catch(e => status(`autoload 失敗：${e.message}`));
 }
 
-document.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
+document.addEventListener('dragover', e => {
+	e.preventDefault();
+	if (e.dataTransfer) e.dataTransfer.dropEffect = loadGuard.busy ? 'none' : 'copy';
+	document.body.classList.toggle('dragging', !loadGuard.busy);
+});
 document.addEventListener('dragleave', e => { if (e.relatedTarget === null) document.body.classList.remove('dragging'); });
 document.addEventListener('drop', e => {
 	e.preventDefault();

@@ -27,7 +27,7 @@ export function detectPitch(
 		worker.onerror = (err: ErrorEvent) => { err.preventDefault(); fail(new Error(err.message || '音高 Worker 無法啟動')); };
 		worker.onmessageerror = () => fail(new Error('音高 Worker 資料傳輸失敗'));
 
-		// audio 要複製一份再轉移，因為原始的 mono16k 之後還要用
+		// 保留原始 mono16k 供 GPU 失敗後的 WASM 回退；最終成功後由載入流程釋放。
 		try {
 			const copy = mono16k.slice();
 			worker.postMessage({ audio: copy, modelUrl: new URL('models/swift_f0.onnx', document.baseURI).href }, [copy.buffer]);

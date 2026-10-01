@@ -53,6 +53,7 @@ type Range = { from: number; to: number };
 /** 一個算繪 worker 的連線。背景精算要能隨時整個丟掉，所以包成可以單獨終止的單位。 */
 class WorkerLink {
 	private worker: Worker;
+	private failure: Error | null = null;
 	readonly ready: Promise<void>;
 	private nextId = 1;
 	private pending = new Map<number, {
@@ -63,10 +64,20 @@ class WorkerLink {
 
 	constructor(channels: Samples[], sampleRate: number) {
 		this.worker = new RenderWorker();
-		this.ready = new Promise<void>(resolve => {
+		this.ready = new Promise<void>((resolve, reject) => {
+			const fail = (error: Error) => {
+				this.failure = error;
+				reject(error);
+				for (const p of this.pending.values()) p.reject(error);
+				this.pending.clear();
+				this.worker.terminate();
+			};
+			this.worker.onerror = event => { event.preventDefault(); fail(new Error(event.message || '音訊引擎 Worker 無法啟動')); };
+			this.worker.onmessageerror = () => fail(new Error('音訊引擎 Worker 資料傳輸失敗'));
 			this.worker.onmessage = (e: MessageEvent) => {
 				const d = e.data;
 				if (d.type === 'ready') { resolve(); return; }
+				if (d.type === 'error' && d.id === undefined) { fail(new Error(d.error)); return; }
 				const p = this.pending.get(d.id);
 				if (!p) return;
 				// 進度訊息不算「完成」，不能把 pending 清掉
@@ -83,6 +94,7 @@ class WorkerLink {
 
 	async render(msg: object, onProgress?: (f: number) => void): Promise<Float32Array[]> {
 		await this.ready;
+		if (this.failure) throw this.failure;
 		const id = this.nextId++;
 		return new Promise((resolve, reject) => {
 			this.pending.set(id, { resolve, reject, onProgress });

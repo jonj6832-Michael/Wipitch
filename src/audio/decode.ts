@@ -9,8 +9,8 @@ export interface Source {
 	sampleRate: number;
 	/** 長度（秒） */
 	duration: number;
-	/** 給音高偵測用的 16kHz 單聲道版本 */
-	mono16k: Samples;
+	/** 給音高偵測用的 16kHz 單聲道版本；分析成功後釋放。 */
+	mono16k: Samples | null;
 }
 
 /** SwiftF0 的工作取樣率。所有音高分析都在這個取樣率上做。 */
@@ -41,6 +41,7 @@ export async function decodeFile(file: File, onProgress?: DecodeProgress): Promi
 	try { buffer = await ctx.decodeAudioData(bytes); }
 	finally { await ctx.close(); }
 
+	onProgress?.('複製聲道資料', null);
 	const channels: Samples[] = [];
 	for (let c = 0; c < buffer.numberOfChannels; c++) {
 		channels.push(buffer.getChannelData(c).slice() as Samples);

@@ -76,6 +76,7 @@ button, .file {
 button:hover:not(:disabled):not(.piano-key), .file:hover { background: #303845; }
 button:disabled { opacity: 0.4; cursor: default; }
 .file input { display: none; }
+.file.file-busy { opacity: .5; cursor: wait; }
 
 .transport { display: flex; align-items: center; gap: 8px; }
 #clock { font-variant-numeric: tabular-nums; color: var(--dim); min-width: 74px; }
@@ -319,6 +320,9 @@ body.dragging #drop-hint { display: grid; }
 #progress-bar:indeterminate::-webkit-progress-bar { background: transparent; }
 .progress-value { flex: 0 0 58px; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
 #progress.error #progress-label, #progress.error .progress-value { color: #ff8585; }
+#load-timings { position: relative; flex: 0 0 auto; }
+#load-timings summary { cursor: pointer; color: var(--accent); }
+#load-timings pre { position: absolute; bottom: 22px; right: 0; z-index: 20; width: min(520px, 90vw); max-height: 65vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; font: 12px/1.7 monospace; box-shadow: 0 4px 20px #0008; }
 @keyframes progress-pulse { to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { #progress-bar:indeterminate { animation: none; } }
 
