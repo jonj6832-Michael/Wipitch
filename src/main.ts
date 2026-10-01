@@ -18,6 +18,7 @@ import { ProgressView, type ProgressTask } from './ui/progress';
 import { bindZoomGesture } from './ui/zoom-gesture';
 import { DetectionBar } from './ui/detection-bar';
 import { ComputeModeControl } from './ui/compute-mode';
+import { bindPianoAudition } from './ui/piano-audition';
 
 const el = {
 	file: document.getElementById('file') as HTMLInputElement,
@@ -215,6 +216,9 @@ function finishRenderProgress(label: string, error = false) {
 	renderProgress = null;
 }
 const hint = (msg: string) => { el.hint.textContent = msg; };
+bindPianoAudition(el.pianoKeys, midi => pianoroll.setPressedMidi(midi), error => {
+	hint(`琴鍵試聽失敗：${error instanceof Error ? error.message : String(error)}`);
+});
 
 // ── 載入 ────────────────────────────────────────────────────────────────
 

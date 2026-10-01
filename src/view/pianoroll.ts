@@ -43,6 +43,15 @@ export class PianoRollView {
 	active: LaneId = 'pitch';
 
 	private keyboardLayout = '';
+	private pressedMidi: number | null = null;
+	setPressedMidi(midi: number | null) {
+		this.pressedMidi = midi;
+		for (const key of this.keyboard.querySelectorAll<HTMLElement>('.piano-key')) {
+			const pressed = Number(key.dataset.midi) === midi;
+			key.classList.toggle('pressed', pressed);
+			key.setAttribute('aria-pressed', String(pressed));
+		}
+	}
 	private keyFilter: KeySignature | null = null;
 	detectionRange: DetectionRange | null = null;
 
@@ -376,8 +385,13 @@ export class PianoRollView {
 			const top = black ? y - step * 0.46 : this.midiToY(m + above / 2, h);
 			const bottom = black ? y + step * 0.46 : this.midiToY(m - below / 2, h);
 			if (bottom <= 0 || top >= h) continue;
-			const key = document.createElement('div');
+			const key = document.createElement('button');
+			key.type = 'button';
+			key.disabled = m < 0 || m > 127;
+			key.setAttribute('aria-label', `試聽 ${midiToName(m)}`);
+			key.setAttribute('aria-pressed', String(m === this.pressedMidi));
 			key.className = `piano-key ${black ? 'black' : 'white'}${octave ? ' octave' : ''}`;
+			key.classList.toggle('pressed', m === this.pressedMidi);
 			const inKey = isInKey(m, this.keyFilter);
 			key.classList.toggle('out-of-key', !inKey);
 			key.dataset.midi = String(m);
