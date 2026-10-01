@@ -20,6 +20,9 @@ import { DetectionBar } from './ui/detection-bar';
 import { ComputeModeControl } from './ui/compute-mode';
 import { bindPianoAudition } from './ui/piano-audition';
 import { LoadGuard, LoadTimings, analyseSource } from './loading';
+import { correctionNotes, applyCorrection } from './model/auto-pitch';
+import { suggestCorrections } from './analysis/ai-correction';
+import { AISettingsView } from './ui/ai-settings';
 
 const el = {
 	file: document.getElementById('file') as HTMLInputElement,
@@ -115,6 +118,8 @@ let curves: Curves | null = null;
 let selection: { start: number; end: number } | null = null;
 let baseInfo = '';
 let busy = false;
+let aiWorking = false;
+let aiReady = false;
 const computeControl = new ComputeModeControl(
 	document.getElementById('compute-mode') as HTMLSelectElement,
 	document.getElementById('compute-status')!,
@@ -226,6 +231,7 @@ bindPianoAudition(el.pianoKeys, midi => pianoroll.setPressedMidi(midi), error =>
 const loadGuard = new LoadGuard();
 const loadTimingsPanel = document.getElementById('load-timings') as HTMLDetailsElement;
 async function load(file: File) {
+	if (aiWorking) { hint('AI 修正中，請先完成或取消修正。'); return; }
 	const accepted = await loadGuard.run(() => loadOnce(file), busy => {
 		el.file.disabled = busy;
 		el.file.closest('label')?.classList.toggle('file-busy', busy);
@@ -235,6 +241,7 @@ async function load(file: File) {
 }
 
 async function loadOnce(file: File) {
+	aiReady = false;
 	const timings = new LoadTimings();
 	let success = false, releasedBytes = 0;
 	let failureLabel = '讀取失敗';
@@ -301,6 +308,7 @@ async function loadOnce(file: File) {
 		status(baseInfo);
 		progress.finish('讀取與音高分析完成');
 		success = true;
+		aiReady = true;
 		hint('拖曳選取一段，用面板調整；1/2/3 切換音高・音量・Formant，B 切畫筆');
 	} catch (e) {
 		const message = `${failureLabel}：${e instanceof Error ? e.message : String(e)}`;
@@ -341,8 +349,8 @@ if (autoload) {
 
 document.addEventListener('dragover', e => {
 	e.preventDefault();
-	if (e.dataTransfer) e.dataTransfer.dropEffect = loadGuard.busy ? 'none' : 'copy';
-	document.body.classList.toggle('dragging', !loadGuard.busy);
+	if (e.dataTransfer) e.dataTransfer.dropEffect = loadGuard.busy || aiWorking ? 'none' : 'copy';
+	document.body.classList.toggle('dragging', !loadGuard.busy && !aiWorking);
 });
 document.addEventListener('dragleave', e => { if (e.relatedTarget === null) document.body.classList.remove('dragging'); });
 document.addEventListener('drop', e => {
@@ -499,7 +507,7 @@ selectionChanged();
 // ── 鍵盤 ────────────────────────────────────────────────────────────────
 
 document.addEventListener('keydown', e => {
-	if (e.target instanceof HTMLInputElement) return;
+	if (aiWorking || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement || (e.target instanceof Element && e.target.closest('dialog, #ai-toolbar'))) return;
 	// Alt 是畫筆的吸附鍵；不擋的話 Firefox 放開 Alt 會跳出選單列
 	if (e.key === 'Alt') e.preventDefault();
 	const digit = ['1', '2', '3'].indexOf(e.key);
@@ -531,14 +539,14 @@ document.addEventListener('keydown', e => {
 });
 
 async function undo() {
-	if (!curves || busy) return;
+	if (!curves || busy || aiWorking || loadGuard.busy) return;
 	const prev = history.undo(curves);
 	if (!prev) { hint('沒有東西可以復原了'); return; }
 	await swapCurves(prev, '復原');
 }
 
 async function redo() {
-	if (!curves || busy) return;
+	if (!curves || busy || aiWorking || loadGuard.busy) return;
 	const next = history.redo(curves);
 	if (!next) { hint('沒有東西可以重做了'); return; }
 	await swapCurves(next, '重做');
@@ -1893,8 +1901,95 @@ function editedPitchIn(fromSec: number, toSec: number): number[] | null {
 
 // ── 畫面更新 ────────────────────────────────────────────────────────────
 
+const aiButton = document.getElementById('ai-correct') as HTMLButtonElement;
+const aiUndo = document.getElementById('ai-undo') as HTMLButtonElement;
+const aiCancel = document.getElementById('ai-cancel') as HTMLButtonElement;
+const aiLevel = document.getElementById('ai-strength') as HTMLInputElement;
+const aiStatus = document.getElementById('ai-status')!;
+const aiSettingsButton = document.getElementById('ai-settings-open') as HTMLButtonElement;
+const aiSettings = new AISettingsView(document.getElementById('ai-settings-dialog') as HTMLDialogElement, () => {
+	document.getElementById('ai-service')!.textContent = aiSettings.label;
+	aiStatus.textContent = '設定已套用；調整程度後按 AI 修正';
+});
+document.getElementById('ai-service')!.textContent = aiSettings.label;
+let aiAbort: AbortController | null = null;
+aiSettingsButton.addEventListener('click', () => aiSettings.open());
+aiLevel.addEventListener('input', () => {
+	document.getElementById('ai-strength-value')!.textContent = `${aiLevel.value} / 10`;
+	aiLevel.setAttribute('aria-valuetext', `${aiLevel.value} 級，修正音符中心偏差的 ${Number(aiLevel.value) * 10}%`);
+});
+aiUndo.addEventListener('click', async () => {
+	await undo();
+	aiStatus.textContent = el.hint.textContent;
+});
+aiCancel.addEventListener('click', () => { aiAbort?.abort(); aiCancel.disabled = true; });
+
+function syncAIControls() {
+	const locked = aiWorking || busy || loadGuard.busy || progressView.isBusy;
+	const range = detectionBar.range;
+	aiButton.disabled = locked || !aiReady || !curves || !pitchMidi || !curveVoiced || !el.keyFilter.value || !range || range.end <= range.start;
+	aiButton.title = !el.keyFilter.value ? '請先選擇 Key（不能是全部音）' : !range || range.end <= range.start ? '請先在檢測列標示範圍' : '只修正檢測範圍；修正後可播放試聽或回復上一步';
+	aiUndo.disabled = locked || !aiReady || history.depth === 0;
+	aiSettingsButton.disabled = aiLevel.disabled = locked;
+}
+
+aiButton.addEventListener('click', async () => {
+	if (aiButton.disabled || !source || !curves || !pitchMidi || !curveVoiced || drag) return;
+	const key = KEY_OPTIONS.find(k => k.id === el.keyFilter.value);
+	const range = detectionBar.range && { ...detectionBar.range };
+	if (!key || !range || range.end <= range.start) return;
+	const before = curves.clone();
+	const level = Number(aiLevel.value);
+	const settings = { ...aiSettings.settings };
+	const controller = new AbortController(); aiAbort = controller;
+	aiWorking = busy = true;
+	player.pause(); syncPlayButton();
+	const header = document.querySelector('header')!;
+	header.inert = el.stage.inert = el.globalBar.inert = true;
+	aiCancel.hidden = false; aiCancel.disabled = false;
+	const task = progressView.begin('準備修正音符');
+	aiStatus.textContent = '整理檢測範圍內的穩定音符…';
+	syncAIControls();
+	try {
+		const notes = correctionNotes(before, pitchMidi, curveVoiced, key, range);
+		if (!notes.length) throw new Error('檢測範圍內沒有足夠穩定的音符；短音、滑音及低可信度段落會保留');
+		const decisions = await suggestCorrections(settings, notes, key, controller.signal, (done, total) => {
+			aiStatus.textContent = `AI 建議 ${done} / ${total} 批（${notes.length} 個音符）`;
+			task.update('AI 分析音符摘要', total ? done / total : 0);
+		});
+		if (controller.signal.aborted) throw new Error('AI 修正已取消，未套用變更');
+		const result = applyCorrection(before, notes, decisions, key, level, curveVoiced);
+		if (!result.count || sameCurves(before, result.curves)) {
+			aiStatus.textContent = '沒有需要修正的穩定音符；不確定的音符保留原樣';
+			task.finish('沒有套用修正'); return;
+		}
+		// 修正曲線尚未提交；模型失敗／取消不會增加復原紀錄。開始音訊算繪後不再接受取消。
+		aiCancel.disabled = true;
+		aiStatus.textContent = '正在套用修正音訊…';
+		task.update('算繪修正音訊');
+		await renderer.patch(result.curves, range.start, range.end);
+		history.push(before);
+		curves = result.curves;
+		selBase = selection ? curves.clone() : null;
+		sessionPushed = false; resetParams();
+		player.setAudio(renderer.rendered, renderer.sampleRate);
+		scheduleBackground({ from: range.start, to: range.end });
+		aiStatus.textContent = `${settings.provider === 'builtin' ? '內建調性修正' : 'AI 修正'}完成：${result.count} 個音符 · ${key.label} · ${level}/10 · ${fmtTime(range.start)}～${fmtTime(range.end)}`;
+		task.finish('音高修正完成，可播放試聽或回復上一步');
+	} catch (error) {
+		aiStatus.textContent = error instanceof Error ? error.message : '修正失敗';
+		task.finish(aiStatus.textContent, !controller.signal.aborted);
+	} finally {
+		aiAbort = null; aiWorking = busy = false;
+		header.inert = el.stage.inert = el.globalBar.inert = false;
+		aiCancel.hidden = true;
+		syncAIControls();
+	}
+});
+
 function frame() {
 	computeControl.sync();
+	syncAIControls();
 	if (source) {
 		const pos = player.position;
 		el.clock.textContent = fmtTime(pos);

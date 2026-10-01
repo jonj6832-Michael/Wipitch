@@ -35,11 +35,36 @@
 		<div id="hint"></div>
 		<a id="help-link" href="https://code.wiwi.blog/wiwi/WiPitch" target="_blank" rel="noopener" title="使用說明與原始碼" aria-label="使用說明與原始碼">?</a>
 	</header>
+	<div id="ai-toolbar" aria-label="AI 音高修正">
+		<button id="ai-settings-open" type="button">AI 設定</button>
+		<span id="ai-service">內建調性修正（不連線）</span>
+		<label for="ai-strength">修正程度</label>
+		<input id="ai-strength" type="range" min="1" max="10" step="1" value="5" title="1 級修正 10%，10 級完整修正音符中心；保留顫音。調整後按 AI 修正套用。">
+		<output id="ai-strength-value" for="ai-strength">5 / 10</output>
+		<button id="ai-correct" type="button" disabled>AI 修正</button>
+		<button id="ai-undo" type="button" disabled>回復上一步</button>
+		<button id="ai-cancel" type="button" hidden>取消修正</button>
+		<span id="ai-status" role="status">選擇 Key 並在檢測列標示範圍</span>
+	</div>
+	<dialog id="ai-settings-dialog" aria-labelledby="ai-settings-title">
+		<form>
+			<h2 id="ai-settings-title">AI 修正設定</h2>
+			<label for="ai-provider">修正服務</label>
+			<select id="ai-provider"><option value="builtin">內建調性修正（不連線）</option><option value="ollama">本機 Ollama</option><option value="openai">OpenAI 相容 API</option></select>
+			<label for="ai-url">API 基底網址</label><input id="ai-url" type="url" placeholder="http://localhost:11434" autocomplete="off">
+			<label for="ai-model">模型名稱</label><input id="ai-model" list="ai-models" placeholder="填入已安裝或服務提供的模型名稱" autocomplete="off"><datalist id="ai-models"></datalist>
+			<label for="ai-api-key">API Key（本機 Ollama 通常不需要）</label><input id="ai-api-key" type="password" autocomplete="off" spellcheck="false">
+			<p>API Key 僅保留在目前分頁，重新整理後需再輸入。外部服務僅接收檢測範圍內的音符摘要，不傳送原始音檔；使用遠端或雲端模型時，摘要會交給該服務處理。</p>
+			<p>Ollama 填根網址；OpenAI 相容 API 填含 /v1 的基底網址（依服務設定）。服務須允許目前網站跨來源連線。</p>
+			<div id="ai-settings-status" role="status"></div>
+			<div class="ai-dialog-actions"><button id="ai-test" type="button">讀取模型／測試連線</button><button id="ai-close" type="button">取消</button><button id="ai-save" type="submit">套用設定</button></div>
+		</form>
+	</dialog>
 
 	<main id="stage" hidden>
 		<div class="track" id="pitch-track">
 			<div id="pitch-toolbar">
-				<label id="key-filter-control" title="調外音的琴鍵顯示灰白；僅影響音高對照顯示">
+				<label id="key-filter-control" title="調外音的琴鍵顯示灰白；AI 修正以此 Key 作為目標音階">
 					Key <select id="key-filter" aria-label="調性 Key 過濾器"><option value="">全部音</option></select>
 				</label>
 				<!-- 第二列：選取工具且有選取 → 參數面板；畫筆工具 → 畫筆選項；其他 → 隱藏 -->
