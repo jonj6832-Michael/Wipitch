@@ -224,6 +224,8 @@ function finishRenderProgress(label: string, error = false) {
 const hint = (msg: string) => { el.hint.textContent = msg; };
 bindPianoAudition(el.pianoKeys, midi => pianoroll.setPressedMidi(midi), error => {
 	hint(`琴鍵試聽失敗：${error instanceof Error ? error.message : String(error)}`);
+}, loading => {
+	hint(loading ? '鋼琴音色載入中…' : '鋼琴音色載入結束，可按琴鍵試聽。');
 });
 
 // ── 載入 ────────────────────────────────────────────────────────────────

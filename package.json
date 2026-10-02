@@ -5,7 +5,8 @@
 	"type": "module",
 	"dependencies": {
 		"onnxruntime-web": "file:vendor/onnxruntime-web-1.29.0.tgz",
-		"rubberband-wasm": "file:vendor/rubberband-wasm-3.3.0.tgz"
+		"rubberband-wasm": "file:vendor/rubberband-wasm-3.3.0.tgz",
+		"tone": "15.1.22"
 	},
 	"overrides": {
 		"onnxruntime-common": "file:vendor/onnxruntime-common-1.29.0.tgz",

@@ -1,10 +1,34 @@
-import { midiToHz } from '../analysis/swiftf0';
+export interface PreviewInstrument {
+	attack(midi: number): void;
+	release(midi: number): void;
+}
 
-/** 輕量合成試聽音，MIDI 音號轉頻率；不寫入音檔或算繪緩衝區。 */
+const loadPiano = (context: AudioContext) => import('./tone-piano').then(module => module.loadPiano(context));
+
+/** Tone.js 取樣鋼琴；不寫入音檔或算繪緩衝區。 */
 export class NotePreview {
 	private context: AudioContext | null = null;
+	private instrument: Promise<PreviewInstrument> | null = null;
 	private stopCurrent: (() => void) | null = null;
-	constructor(private createContext = () => new AudioContext()) {}
+	constructor(
+		private createContext = () => new AudioContext({ latencyHint: 'interactive' }),
+		private loadInstrument = loadPiano,
+		private onLoading: (loading: boolean) => void = () => {},
+	) {}
+	/** 游標進入琴鍵時預載；失敗後下一次操作可重試。 */
+	async prepare(): Promise<PreviewInstrument> {
+		if (!this.instrument) {
+			const ctx = this.context ??= this.createContext();
+			this.onLoading(true);
+			this.instrument = Promise.resolve().then(() => this.loadInstrument(ctx)).catch(error => {
+				this.instrument = null;
+				this.context = null;
+				void ctx.close().catch(() => {});
+				throw error;
+			}).finally(() => this.onLoading(false));
+		}
+		return this.instrument;
+	}
 	start(midi: number, onError: (error: unknown) => void): () => void {
 		this.stopCurrent?.();
 		if (!Number.isInteger(midi) || midi < 0 || midi > 127) return () => {};
@@ -20,22 +44,10 @@ export class NotePreview {
 		try {
 			const ctx = this.context ??= this.createContext();
 			// 在使用者按下琴鍵的事件內 resume，符合瀏覽器的音訊啟動要求。
-			void ctx.resume().then(() => {
+			void Promise.all([ctx.resume(), this.prepare()]).then(([, piano]) => {
 				if (cancelled) return;
-				const oscillator = ctx.createOscillator();
-				const gain = ctx.createGain();
-				oscillator.type = 'triangle';
-				oscillator.frequency.setValueAtTime(midiToHz(midi), ctx.currentTime);
-				gain.gain.setValueAtTime(0, ctx.currentTime);
-				gain.gain.linearRampToValueAtTime(0.12, ctx.currentTime + 0.015);
-				oscillator.connect(gain); gain.connect(ctx.destination);
-				oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
-				release = () => {
-					gain.gain.cancelAndHoldAtTime(ctx.currentTime);
-					gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.04);
-					oscillator.stop(ctx.currentTime + 0.05);
-				};
-				oscillator.start();
+				piano.attack(midi);
+				release = () => piano.release(midi);
 			}).catch(error => { if (!cancelled) { stop(); onError(error); } });
 		} catch (error) { stop(); onError(error); }
 		return stop;

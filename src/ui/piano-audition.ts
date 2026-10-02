@@ -1,7 +1,14 @@
 import { NotePreview } from '../audio/note-preview';
 
-export function bindPianoAudition(root: HTMLElement, showPressed: (midi: number | null) => void, onError: (error: unknown) => void) {
-	const synth = new NotePreview();
+export function bindPianoAudition(root: HTMLElement, showPressed: (midi: number | null) => void, onError: (error: unknown) => void, onLoading: (loading: boolean) => void = () => {}) {
+	const synth = new NotePreview(undefined, undefined, loading => {
+		root.setAttribute('aria-busy', String(loading));
+		root.title = loading ? '鋼琴音色載入中…' : 'Tone.js · Salamander 鋼琴';
+		onLoading(loading);
+	});
+	const prepare = () => { void synth.prepare().catch(onError); };
+	root.addEventListener('pointerenter', prepare);
+	root.addEventListener('focusin', prepare);
 	let stopNote: (() => void) | null = null;
 	let pointer: number | null = null;
 	let keyboardKey: string | null = null;

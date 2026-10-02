@@ -230,9 +230,12 @@ npm run build
 - 音高偵測：[SwiftF0](https://github.com/lars76/swift-f0)（ONNX，在瀏覽器的 Web Worker 裡跑）
 - 變調與時間伸縮：[Rubber Band Library](https://breakfastquay.com/rubberband/) 3.3（WebAssembly）
 - 介面：TypeScript + Canvas，沒有使用前端框架
+- 琴鍵試聽：[Tone.js Sampler](https://tonejs.github.io/examples/sampler) 搭配 Salamander 鋼琴取樣，透過電腦喇叭播放。滑鼠進入琴鍵區或鍵盤聚焦時預載音色；按住發聲、放開後短暫衰減。音色約 2 MB，隨程式保存，不需連線到外部音色服務。
 
 設計細節、實測數據與開發說明見 [`docs/DESIGN.md`](docs/DESIGN.md) 與 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
 ## 授權
 
 GPL-3.0。Rubber Band Library 以 GPL 授權，本專案隨之。
+
+Tone.js 使用 MIT 授權。鋼琴取樣由 Alexander Holm 製作（Salamander Grand Piano / Yamaha C5），採 [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) 授權。取自 [Tone.js 官方音色庫](https://github.com/Tonejs/audio/tree/master/salamander)，30 個 MP3 檔保持原樣，原始作者說明保存在 `public/audio/salamander/README`。
