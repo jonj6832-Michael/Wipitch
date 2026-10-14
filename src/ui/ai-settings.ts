@@ -4,23 +4,27 @@ const STORAGE_KEY = 'wipitch.ai-settings';
 export class AISettingsView {
 	settings: AISettings = { ...DEFAULT_AI_SETTINGS };
 	private testing: AbortController | null = null;
+	private builtinReady = false;
+	private builtinMessage = '正在檢查本機訓練資料';
+	private provider: HTMLSelectElement;
+	private status: HTMLElement;
 	constructor(private dialog: HTMLDialogElement, private changed: () => void) {
 		try {
 			const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
-			if (saved && ['builtin', 'ollama', 'openai'].includes(saved.provider) && typeof saved.baseUrl === 'string' && typeof saved.model === 'string') {
-				this.settings = { provider: saved.provider, baseUrl: saved.baseUrl, model: saved.model, apiKey: '' };
+			if (saved && ['builtin', 'rules', 'builtin-ai', 'ollama', 'openai'].includes(saved.provider) && typeof saved.baseUrl === 'string' && typeof saved.model === 'string') {
+				this.settings = { provider: saved.provider === 'builtin' ? 'rules' : saved.provider, baseUrl: saved.baseUrl, model: saved.model, apiKey: '' };
 			}
 		} catch { /* 使用預設設定 */ }
-		const provider = dialog.querySelector<HTMLSelectElement>('#ai-provider')!;
+		const provider = this.provider = dialog.querySelector<HTMLSelectElement>('#ai-provider')!;
 		const url = dialog.querySelector<HTMLInputElement>('#ai-url')!;
 		const model = dialog.querySelector<HTMLInputElement>('#ai-model')!;
 		const key = dialog.querySelector<HTMLInputElement>('#ai-api-key')!;
-		const status = dialog.querySelector<HTMLElement>('#ai-settings-status')!;
+		const status = this.status = dialog.querySelector<HTMLElement>('#ai-settings-status')!;
 		const test = dialog.querySelector<HTMLButtonElement>('#ai-test')!;
 		const save = dialog.querySelector<HTMLButtonElement>('#ai-save')!;
 		const read = (): AISettings => ({ provider: provider.value as AISettings['provider'], baseUrl: url.value.trim(), model: model.value.trim(), apiKey: key.value.trim() });
 		const sync = () => {
-			const off = provider.value === 'builtin';
+			const off = provider.value === 'rules' || provider.value === 'builtin-ai';
 			url.disabled = model.disabled = key.disabled = test.disabled = off;
 			url.placeholder = provider.value === 'ollama' ? 'http://localhost:11434' : 'https://服務網址/v1';
 		};
@@ -47,7 +51,8 @@ export class AISettingsView {
 			event.preventDefault();
 			try {
 				const next = read();
-				if (next.provider !== 'builtin') {
+				if (next.provider === 'builtin-ai' && !this.builtinReady) throw new Error(this.builtinMessage);
+				if (next.provider === 'ollama' || next.provider === 'openai') {
 					endpoint(next);
 					if (!next.model) throw new Error('請填入模型名稱');
 				}
@@ -68,5 +73,17 @@ export class AISettingsView {
 	}
 	private populate: () => void;
 	open() { this.populate(); this.dialog.showModal(); }
-	get label() { return this.settings.provider === 'builtin' ? '內建調性修正（不連線）' : `${this.settings.provider === 'ollama' ? 'Ollama' : 'API'} · ${this.settings.model || '未設定模型'}`; }
+	setBuiltinAIState(ready: boolean, message: string) {
+		this.builtinReady = ready; this.builtinMessage = message;
+		const option = this.provider.querySelector<HTMLOptionElement>('option[value="builtin-ai"]');
+		if (option) { option.disabled = !ready; option.textContent = ready ? `內建 AI 模式（${message}）` : `內建 AI 模式（${message}）`; }
+		if (this.provider.value === 'builtin-ai') this.status.textContent = message;
+		this.changed();
+	}
+	get ready() { return this.settings.provider !== 'builtin-ai' || this.builtinReady; }
+	get label() {
+		if (this.settings.provider === 'rules') return '傳統內建模式（固定規則）';
+		if (this.settings.provider === 'builtin-ai') return this.builtinReady ? '內建 AI 模式' : `內建 AI：${this.builtinMessage}`;
+		return `${this.settings.provider === 'ollama' ? '外部 Ollama' : '外部 API'} · ${this.settings.model || '未設定模型'}`;
+	}
 }

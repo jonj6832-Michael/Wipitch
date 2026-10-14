@@ -1,18 +1,20 @@
 // 專案存檔。
 //
-// 存的是「原始檔資訊 + 曲線」，不存音訊——音訊永遠以使用者手上的原檔為準。
+// 存的是「原始檔絕對路徑 + 原始檔資訊 + 曲線」，不把音訊嵌入專案。
 // 這跟 pitchmark.py 的 .pitchsession.json 是同一個想法：
 // session 檔才是原始檔，算繪結果隨時可以重新產生。
 import { Curves, CURVE_HOP_SEC, CURVE_SUB, upsample, type LaneId } from './curves';
 import { TimeMap } from './timemap';
 
 const FORMAT = 'wipitch-project';
-const VERSION = 4;
+const VERSION = 5;
 
 interface ProjectFile {
 	format: string;
 	version: number;
 	audioName: string;
+	/** v5：本機原始音訊的絕對路徑；舊專案沒有此欄位。 */
+	audioPath?: string;
 	sampleRate: number;
 	duration: number;
 	hopSec: number;
@@ -43,12 +45,12 @@ export interface BackgroundSettings {
 }
 
 export function serialize(
-	curves: Curves, audioName: string, sampleRate: number, duration: number, formantFollow = 0,
+	curves: Curves, audioName: string, audioPath: string, sampleRate: number, duration: number, formantFollow = 0,
 	background?: BackgroundSettings,
 ): string {
 	const data: ProjectFile = {
 		format: FORMAT, version: VERSION,
-		audioName, sampleRate, duration,
+		audioName, audioPath, sampleRate, duration,
 		hopSec: CURVE_HOP_SEC, length: curves.length,
 		pitch: toBase64(curves.pitch),
 		gainDb: toBase64(curves.gainDb),
@@ -75,10 +77,33 @@ export interface LoadedProject {
 	background?: BackgroundSettings;
 }
 
-export function deserialize(text: string, sampleRate: number, trackLength: number): LoadedProject {
+export interface ProjectSource {
+	version: number;
+	audioName: string;
+	audioPath?: string;
+	sampleRate: number;
+	duration: number;
+}
+
+function parseProject(text: string): ProjectFile {
 	const d = JSON.parse(text) as ProjectFile;
 	if (d.format !== FORMAT) throw new Error('這不是 WiPitch 專案檔');
+	if (!Number.isInteger(d.version) || d.version < 1) throw new Error('專案檔版本無效');
 	if (d.version > VERSION) throw new Error(`專案檔版本 ${d.version} 太新，這個版本讀不了`);
+	if (!d.audioName || !Number.isFinite(d.sampleRate) || !Number.isFinite(d.duration)) throw new Error('專案檔缺少原始音訊資訊');
+	if (d.version >= 5 && d.audioPath === undefined) throw new Error('專案檔缺少原始音訊的絕對路徑');
+	if (d.audioPath !== undefined && (typeof d.audioPath !== 'string' || !d.audioPath.startsWith('/'))) throw new Error('專案檔的音訊絕對路徑無效');
+	return d;
+}
+
+/** 先取得原音訊位置，讓應用程式能先載入音訊，再還原曲線。 */
+export function inspectProject(text: string): ProjectSource {
+	const d = parseProject(text);
+	return { version: d.version, audioName: d.audioName, audioPath: d.audioPath, sampleRate: d.sampleRate, duration: d.duration };
+}
+
+export function deserialize(text: string, sampleRate: number, trackLength: number): LoadedProject {
+	const d = parseProject(text);
 	if (d.sampleRate !== sampleRate) {
 		throw new Error(`專案檔的取樣率是 ${d.sampleRate}Hz，目前的音檔是 ${sampleRate}Hz，時間軸會對不上`);
 	}

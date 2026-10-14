@@ -3,6 +3,7 @@ import { withWasmFallback } from '../src/analysis/compute-mode.ts';
 import { installSwiftF0Worker } from '../src/analysis/swiftf0-engine.ts';
 import { ComputeModeControl } from '../src/ui/compute-mode.ts';
 import { ProgressView } from '../src/ui/progress.ts';
+import { WorkState } from '../src/application/work-state.ts';
 
 let calls = [];
 assert.equal(await withWasmFallback('gpu', async backend => { calls.push(backend); return 1; }, () => assert.fail()), 1);
@@ -57,10 +58,11 @@ const select = {value:'',disabled:false,addEventListener:(_event,fn)=>change=fn}
 const status = {textContent:'',title:''};
 const nodes = new Map(['progress','#progress-label','.progress-value'].map(k=>[k,{removeAttribute(){}}]));
 const progress = new ProgressView({querySelector:k=>nodes.get(k),classList:{toggle(){}},setAttribute(){}});
-const control = new ComputeModeControl(select,status,()=>progress.isBusy);
-progress.onBusyChange=()=>control.sync();
+const work = new WorkState();
+const control = new ComputeModeControl(select,status,()=>work.isBusy);
+work.subscribe(state => { progress.render(state.progress); control.sync(); });
 assert.equal(select.value,'gpu');
-const foreground=progress.begin('讀取');const background=progress.begin('精算',0);
+const foreground=work.begin('load','讀取');const background=work.begin('background','精算');
 assert.equal(select.disabled,true);select.value='wasm';change();assert.equal(control.mode,'gpu');
 foreground.finish('完成');assert.equal(select.disabled,true);
 background.finish('失敗',true);assert.equal(select.disabled,false);

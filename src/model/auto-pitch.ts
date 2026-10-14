@@ -3,6 +3,7 @@ import { isInKey, type KeySignature } from './keys';
 
 export interface CorrectionNote {
 	id: number;
+ kind?: 'onset' | 'drift' | 'center';
 	/** 原始時間軸上的曲線格，半開區間。模型不可改寫。 */
 	from: number;
 	to: number;
@@ -12,6 +13,8 @@ export interface CorrectionNote {
 	defaultTarget: number | null;
 }
 export interface CorrectionDecision { id: number; targetMidi: number | null }
+export type CorrectionStrategy = 'strength' | 'sensitivity';
+type CorrectionCurveView = Pick<Curves, 'length' | 'pitch' | 'timeMap'>;
 
 const median = (values: number[]) => {
 	const a = [...values].sort((x, y) => x - y);
@@ -19,7 +22,7 @@ const median = (values: number[]) => {
 };
 
 /** 使用目前編輯後音高，以短視窗中位數與遲滯分音，低可信度格由 voiced 排除。 */
-export function correctionNotes(curves: Curves, midi: Float32Array, voiced: Uint8Array, key: KeySignature,
+export function correctionNotes(curves: CorrectionCurveView, midi: Float32Array, voiced: Uint8Array, key: KeySignature,
 	range: { start: number; end: number }): CorrectionNote[] {
 	const from = Math.max(0, Math.ceil(curves.timeMap.outToSrc(range.start) / CURVE_HOP_SEC));
 	const to = Math.min(curves.length, midi.length, voiced.length, Math.ceil(curves.timeMap.outToSrc(range.end) / CURVE_HOP_SEC));
@@ -83,7 +86,7 @@ export function validateDecisions(value: unknown, notes: CorrectionNote[], key: 
 
 /** 只新增音符中心偏移，不壓平顫音；淡入淡出完全位於檢測範圍內。 */
 export function applyCorrection(base: Curves, notes: CorrectionNote[], decisions: CorrectionDecision[],
-	key: KeySignature, level: number, voiced: Uint8Array): { curves: Curves; count: number } {
+	key: KeySignature, level: number, voiced: Uint8Array, strategy: CorrectionStrategy = 'strength'): { curves: Curves; count: number } {
 	if (!Number.isInteger(level) || level < 1 || level > 10) throw new Error('修正程度必須為 1～10 級');
 	const checked = validateDecisions({ decisions }, notes, key);
 	const byId = new Map(notes.map(note => [note.id, note]));
@@ -92,7 +95,11 @@ export function applyCorrection(base: Curves, notes: CorrectionNote[], decisions
 	for (const decision of checked) {
 		const note = byId.get(decision.id)!;
 		if (decision.targetMidi === null) continue;
-		const delta = (decision.targetMidi - note.center) * level / 10;
+		const error = decision.targetMidi - note.center;
+		// 傳統模式的等級代表挑選敏感度：1 級只處理至少 50 cents，
+		// 每升一級降低 5 cents，10 級處理至少 5 cents。入選後完整修正中心。
+		if (strategy === 'sensitivity' && Math.abs(error) + 1e-9 < (11 - level) * .05) continue;
+		const delta = strategy === 'sensitivity' ? error : error * level / 10;
 		if (Math.abs(delta) < .005) continue;
 		count++;
 		const fade = Math.max(1, Math.min(Math.round(.03 / CURVE_HOP_SEC), Math.floor((note.to - note.from) / 4)));

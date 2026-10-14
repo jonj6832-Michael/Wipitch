@@ -53,4 +53,10 @@ export class History {
 
 	get depth() { return this.stack.length; }
 	get redoDepth() { return this.redoStack.length; }
+
+	/** Drop steps created after a temporary review mode while preserving older edits. */
+	truncate(depth: number) {
+		this.stack.length = Math.max(0, Math.min(this.stack.length, depth));
+		this.redoStack = [];
+	}
 }

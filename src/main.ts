@@ -1,3 +1,8 @@
+import { createAIRegions, regionCurves, resetAIRegionToAI, reviewedAIRegions, syncAIRegion, type AIRegion } from './model/ai-regions';
+import { AIRegionOverlay } from './ui/ai-regions';
+import { installTrainingLibrary } from './ui/training-library';
+import { prepareTrainingPair, stageTrainingPair, storeRejectedTrainingPair, resetTrainingStaging, commitTrainingStaging } from './training/recorder';
+import type { Diagnostics } from './dev/diagnostics';
 import { decodeFile, decodeAudio, fmtTime, type Source } from './audio/decode';
 import { ViewState } from './view/viewstate';
 import { WaveformView, RefWaveformView, drawOverview } from './view/waveform';
@@ -7,25 +12,30 @@ import { KEY_MODES, KEY_OPTIONS } from './model/keys';
 import { Player } from './engine/player';
 import { Renderer } from './engine/renderer';
 import { detectPitch } from './analysis/pitch';
-import { hzToMidi, midiToName, frameTime, HOP, CENTER_OFFSET, type PitchTrack } from './analysis/swiftf0';
+import { hzToMidi, midiToName, type PitchTrack } from './analysis/swiftf0';
 import { Curves, LANES, LANE_IDS, PEN_RAMP_SEC, DEFAULT_PITCH_SLOPE_LIMIT, CURVE_HOP_SEC, CURVE_SUB, upsample, upsampleVoiced, type LaneId } from './model/curves';
 import { offsetLane, resetLane, resetAll, drawLane, flattenRange, fillGaps, limitSlope, slopeMarginFrames } from './model/edits';
 import { History } from './model/history';
 import { TimeMap } from './model/timemap';
 import { encodeWav24, downloadBlob } from './audio/wav';
-import { serialize, deserialize, type BackgroundSettings } from './model/project';
-import { ProgressView, type ProgressTask } from './ui/progress';
+import { serialize, deserialize, inspectProject, type BackgroundSettings } from './model/project';
+import { pickLocalAudio, readLocalAudio } from './local-audio';
+import { ProgressView } from './ui/progress';
+import { WorkState, type WorkTask } from './application/work-state';
 import { bindZoomGesture } from './ui/zoom-gesture';
 import { DetectionBar } from './ui/detection-bar';
 import { ComputeModeControl } from './ui/compute-mode';
 import { bindPianoAudition } from './ui/piano-audition';
-import { LoadGuard, LoadTimings, analyseSource } from './loading';
-import { correctionNotes, applyCorrection } from './model/auto-pitch';
-import { suggestCorrections } from './analysis/ai-correction';
+import { LoadTimings, analyseSource } from './loading';
+import { AICorrectionFlow } from './application/ai-correction-flow';
 import { AISettingsView } from './ui/ai-settings';
+import { updateBuiltinAIModel } from './analysis/builtin-ai';
+import { planAudioSegments } from './analysis/audio-segments';
+import { collectCorrectionNotesParallel } from './analysis/ai-candidate-pool';
 
 const el = {
 	file: document.getElementById('file') as HTMLInputElement,
+	openAudio: document.getElementById('open-audio') as HTMLButtonElement,
 	play: document.getElementById('play') as HTMLButtonElement,
 	stop: document.getElementById('stop') as HTMLButtonElement,
 	clock: document.getElementById('clock')!,
@@ -89,6 +99,8 @@ const el = {
 	slope: document.getElementById('slope') as HTMLInputElement,
 };
 
+installTrainingLibrary(document.getElementById('training-library-open')!);
+
 const view = new ViewState();
 const waveform = new WaveformView(el.waveform, view);
 const refWave = new RefWaveformView(el.refwave, view);
@@ -108,24 +120,36 @@ el.keyFilter.addEventListener('change', () => {
 const player = new Player();
 const renderer = new Renderer();
 const history = new History();
+const workState = new WorkState();
 const progressView = new ProgressView(document.getElementById('progress')!);
-let renderProgress: ProgressTask | null = null;
-let backgroundTask: ProgressTask | null = null;
+let renderProgress: WorkTask | null = null;
+let backgroundTask: WorkTask | null = null;
 
 let source: Source | null = null;
+let sourceAbsolutePath: string | null = null;
+let manualBaseline: Curves | null = null;
+let aiRegions: AIRegion[] = [];
+let aiPreviewCurves: Curves | null = null;
+let aiReview: { curves: Curves; input: import('./application/ai-correction-flow').CorrectionInput; audio: Map<number, { start:number; end:number; channels: import('./types').Samples[] }>; keyLabel:string; historyDepth:number } | null = null;
+
+let stagedTrainingCount = 0;
+let trainingAsset: { id: string; name: string; size: number; lastModified: number } | null = null;
+const trainingStatus = document.createElement('div');
+trainingStatus.id = 'training-status';
+trainingStatus.setAttribute('role', 'status');
+trainingStatus.textContent = '手動修音記錄：匯出 WAV 時儲存';
+document.body.appendChild(trainingStatus);
 let track: PitchTrack | null = null;
 let curves: Curves | null = null;
 let selection: { start: number; end: number } | null = null;
 let baseInfo = '';
-let busy = false;
-let aiWorking = false;
 let aiReady = false;
 const computeControl = new ComputeModeControl(
 	document.getElementById('compute-mode') as HTMLSelectElement,
 	document.getElementById('compute-status')!,
-	() => progressView.isBusy || busy,
+	() => workState.isBusy,
 );
-progressView.onBusyChange = () => computeControl.sync();
+
 let tool: 'select' | 'pen' = 'select';
 /** 正在算繪的時間範圍（秒）。畫在兩個 canvas 上，讓使用者看得到「是這一段在跑」 */
 let renderingRange: { start: number; end: number } | null = null;
@@ -204,16 +228,16 @@ const selectedAnchors = new Set<number>();
  * 一段長的畫筆或讀檔的整段重算要好幾秒，只有一行「算繪中…」的話，
  * 使用者分不出是在跑還是當掉了。除了進度條，還要在軌道上標出「哪一段在重算」。
  */
-let progressTicks = 0;   // 測試用：確認進度真的有回報，不是只有一個假的進度條
+let diagnostics: Diagnostics | undefined;
 renderer.onProgress = f => {
-	progressTicks++;
+	diagnostics?.recordProgress();
 	renderProgress?.update('音訊算繪中', f);
 };
 function showProgress(range: { start: number; end: number } | null) {
 	renderingRange = range;
 	if (range) {
 		renderProgress?.finish('上一項算繪已結束');
-		renderProgress = progressView.begin('音訊算繪中');
+		renderProgress = workState.begin('render', '音訊算繪中');
 		renderProgress.update('音訊算繪中', 0);
 	}
 }
@@ -230,19 +254,38 @@ bindPianoAudition(el.pianoKeys, midi => pianoroll.setPressedMidi(midi), error =>
 
 // ── 載入 ────────────────────────────────────────────────────────────────
 
-const loadGuard = new LoadGuard();
 const loadTimingsPanel = document.getElementById('load-timings') as HTMLDetailsElement;
-async function load(file: File) {
-	if (aiWorking) { hint('AI 修正中，請先完成或取消修正。'); return; }
-	const accepted = await loadGuard.run(() => loadOnce(file), busy => {
-		el.file.disabled = busy;
-		el.file.closest('label')?.classList.toggle('file-busy', busy);
-		if (!busy) el.file.value = ''; // 失敗後可重新選取同一檔案。
-	});
-	if (!accepted) hint('音檔讀取或分析中，請等完成後再開啟另一個音檔。');
+async function load(file: File, absolutePath: string | null = null): Promise<boolean> {
+ if (!workState.canStart('load')) { hint('目前工作尚未完成，請等完成後再開啟音檔。'); return false; }
+
+	const task = workState.tryBegin('load', '讀取音檔');
+	if (!task) { hint('目前工作尚未完成，請等完成後再開啟音檔。'); return false; }
+	let success = false;
+	sourceAbsolutePath = null;
+	try {
+  const assetId = crypto.randomUUID();
+  await resetTrainingStaging(assetId);
+  aiRegions = []; aiReview = null; aiOverlay.clear();
+  stagedTrainingCount = 0;
+  trainingStatus.textContent = 'AI 訓練暫存已清空，等待手動修音';
+  trainingAsset = null;
+  success = await loadOnce(file, task);
+  if (success) {
+   sourceAbsolutePath = absolutePath;
+   trainingAsset = { id: assetId, name: file.name, size: file.size, lastModified: file.lastModified };
+  }
+ } catch (error) {
+  const message = `開啟音檔失敗：${error instanceof Error ? error.message : String(error)}`;
+  hint(message); task.finish(message, true);
+ }
+	finally {
+		task.finish('讀取工作已結束');
+		el.file.value = '';
+	}
+	return success;
 }
 
-async function loadOnce(file: File) {
+async function loadOnce(file: File, progress: WorkTask): Promise<boolean> {
 	aiReady = false;
 	const timings = new LoadTimings();
 	let success = false, releasedBytes = 0;
@@ -250,7 +293,6 @@ async function loadOnce(file: File) {
 	const computeMode = computeControl.mode;
 	computeControl.start();
 	detectionBar.set(null);
-	const progress = progressView.begin('讀取音檔');
 	loadTimingsPanel.hidden = true;
 	loadTimingsPanel.open = false;
 	status(`解碼 ${file.name}…`);
@@ -299,6 +341,7 @@ async function loadOnce(file: File) {
 		failureLabel = '音高顯示初始化失敗';
 		pianoroll.setTrack(track);
 		curves = new Curves(track.length * CURVE_SUB);
+		manualBaseline = curves.clone();
 		history.reset(curves);
 		syncRampInputs();
 
@@ -306,7 +349,7 @@ async function loadOnce(file: File) {
 		curveVoiced = upsampleVoiced(track.voiced);
 		pitchMidiFilled = fillGaps(pitchMidi, curveVoiced, 0, pitchMidi.length);
 		el.exportBtn.disabled = el.saveBtn.disabled = false;
-		applyDevParams();
+		diagnostics?.applyViewParams();
 		status(baseInfo);
 		progress.finish('讀取與音高分析完成');
 		success = true;
@@ -329,30 +372,26 @@ async function loadOnce(file: File) {
 		loadTimingsPanel.hidden = false;
 		console.info('[WiPitch] load timing', report);
 	}
-}
-
-function applyDevParams() {
-	const p = new URLSearchParams(location.search);
-	if (!p.has('t') && !p.has('span')) return;
-	const span = parseFloat(p.get('span') || '6');
-	view.secPerPx = span / (el.pianoroll.clientWidth || 1200);
-	view.startSec = Math.max(0, parseFloat(p.get('t') || '0'));
-	player.seek(view.startSec);
+	return success;
 }
 
 el.file.addEventListener('change', () => { const f = el.file.files?.[0]; if (f) load(f); });
-
-const autoload = new URLSearchParams(location.search).get('autoload');
-if (autoload) {
-	fetch(autoload).then(r => r.blob())
-		.then(b => load(new File([b], autoload.split('/').pop() || 'audio.wav')))
-		.catch(e => status(`autoload 失敗：${e.message}`));
-}
+el.openAudio.addEventListener('click', async () => {
+	if (!workState.canStart('load')) { hint('目前工作尚未完成，請等完成後再開啟音檔。'); return; }
+	try {
+		const picked = await pickLocalAudio();
+		if (!picked) { hint('已取消開啟音檔'); return; }
+		const file = await readLocalAudio(picked.path, picked);
+		await load(file, picked.path);
+	} catch (error) {
+		hint(`開啟音檔失敗：${error instanceof Error ? error.message : String(error)}`);
+	}
+});
 
 document.addEventListener('dragover', e => {
 	e.preventDefault();
-	if (e.dataTransfer) e.dataTransfer.dropEffect = loadGuard.busy || aiWorking ? 'none' : 'copy';
-	document.body.classList.toggle('dragging', !loadGuard.busy && !aiWorking);
+	if (e.dataTransfer) e.dataTransfer.dropEffect = !workState.canStart('load') ? 'none' : 'copy';
+	document.body.classList.toggle('dragging', workState.canStart('load'));
 });
 document.addEventListener('dragleave', e => { if (e.relatedTarget === null) document.body.classList.remove('dragging'); });
 document.addEventListener('drop', e => {
@@ -432,8 +471,8 @@ function setTool(t: 'select' | 'pen') {
  * 工具列那一列一直都在（右邊有工具與 lane 切換），所以左邊換內容不會讓版面跳動。
  */
 function syncToolbar() {
-	el.penOpts.hidden = tool !== 'pen';
-	el.panel.hidden = tool !== 'select' || !selection;
+	el.penOpts.hidden = !!aiRegions.length || tool !== 'pen';
+	el.panel.hidden = !!aiRegions.length || tool !== 'select' || !selection;
 }
 /**
  * 畫筆的抖音開關。
@@ -509,7 +548,12 @@ selectionChanged();
 // ── 鍵盤 ────────────────────────────────────────────────────────────────
 
 document.addEventListener('keydown', e => {
-	if (aiWorking || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement || (e.target instanceof Element && e.target.closest('dialog, #ai-toolbar'))) return;
+	if (workState.has('ai') || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement || (e.target instanceof Element && e.target.closest('dialog, #ai-toolbar'))) return;
+	if (aiRegions.length && !(e.code === 'Space' || ['l', 'f', 'm'].includes(e.key.toLowerCase()))) {
+		if ((e.ctrlKey || e.metaKey) && ['a', 'z'].includes(e.key.toLowerCase())) e.preventDefault();
+		hint('AI 修音審核中：只能上下拖曳黃色框調整音高，或按「取消AI修改」整體還原');
+		return;
+	}
 	// Alt 是畫筆的吸附鍵；不擋的話 Firefox 放開 Alt 會跳出選單列
 	if (e.key === 'Alt') e.preventDefault();
 	const digit = ['1', '2', '3'].indexOf(e.key);
@@ -541,14 +585,14 @@ document.addEventListener('keydown', e => {
 });
 
 async function undo() {
-	if (!curves || busy || aiWorking || loadGuard.busy) return;
+	if (!curves || workState.blocksEditing) return;
 	const prev = history.undo(curves);
 	if (!prev) { hint('沒有東西可以復原了'); return; }
 	await swapCurves(prev, '復原');
 }
 
 async function redo() {
-	if (!curves || busy || aiWorking || loadGuard.busy) return;
+	if (!curves || workState.blocksEditing) return;
 	const next = history.redo(curves);
 	if (!next) { hint('沒有東西可以重做了'); return; }
 	await swapCurves(next, '重做');
@@ -592,6 +636,7 @@ function applyTimeMap(): { from: number; to: number } | null {
 	const dirty = renderer.setTimeMap(curves.timeMap);
 	view.duration = outDuration();
 	player.setAudio(renderer.rendered, renderer.sampleRate);
+		manualBaseline = curves?.clone() ?? null;
 	return dirty;
 }
 
@@ -629,7 +674,8 @@ function describeAnchors(delta = 0): string {
 }
 
 async function deleteAnchors(ids: number[]) {
-	if (!curves || busy) return;
+ if(aiRegions.length){hint('請先取消 AI 修正標示，再刪除時間錨點');return;}
+	if (!curves || workState.blocksEditing) return;
 	const before = curves.clone();
 	let removed = 0;
 	for (const id of ids) if (curves.timeMap.remove(id)) removed++;
@@ -653,10 +699,16 @@ el.waveform.addEventListener('pointerdown', e => {
 	if (!source) return;
 	const x = e.clientX - el.waveform.getBoundingClientRect().left;
 	const t = Math.max(0, Math.min(outDuration(), view.xToTime(x)));
+	if (aiRegions.length) {
+		player.seek(t);
+		hint('AI 修音審核中：只能上下拖曳黃色框調整音高');
+		return;
+	}
 
 	// 錨點在任何工具下都能選取與拖曳
-	const hit = curves && !busy ? anchorAtX(x) : null;
+	const hit = curves && !workState.blocksEditing ? anchorAtX(x) : null;
 	if (hit !== null) {
+        if(aiRegions.length){hint('請先取消 AI 修正標示，再修改時間錨點');return;}
 		const list = curves!.timeMap.anchors;
 		if (e.shiftKey && anchorPivot !== null && curves!.timeMap.get(anchorPivot)) {
 			// Shift+點擊：從上次點的錨點到這個之間全部選起來（跟檔案總管一樣，取代原本的選取）
@@ -682,7 +734,8 @@ el.waveform.addEventListener('pointerdown', e => {
 		return;
 	}
 	// 畫筆工具點波形 = 加錨點。加錨點本身不改變對應，所以不必重算
-	if (tool === 'pen' && curves && !busy) {
+	if (tool === 'pen' && curves && !workState.blocksEditing) {
+        if(aiRegions.length){hint('請先取消 AI 修正標示，再修改時間錨點');return;}
 		const before = curves.clone();
 		const a = curves.timeMap.add(t);
 		if (!a) { hint('這裡跟既有的錨點重疊了'); return; }
@@ -781,10 +834,15 @@ type DragMode =
 let drag: DragMode | null = null;
 
 el.pianoroll.addEventListener('pointerdown', e => {
-	if (!source || !curves || busy) return;
+	if (!source || !curves || workState.blocksEditing) return;
 	const rect = el.pianoroll.getBoundingClientRect();
 	const x = e.clientX - rect.left, y = e.clientY - rect.top;
 	const t = Math.max(0, Math.min(outDuration(), view.xToTime(x)));
+	if (aiRegions.length) {
+		player.seek(t);
+		hint('AI 修音審核中：請直接在黃色框內上下拖曳調整音高');
+		return;
+	}
 
 	if (tool === 'pen') {
 		drag = { kind: 'pen', base: curves.clone(), startT: t, startY: y, lastT: t, lastY: y, minT: t, maxT: t };
@@ -878,7 +936,7 @@ el.pianoroll.addEventListener('pointerup', async e => {
 		if (sameCurves(mode.base, curves)) return;
 		history.push(mode.base);
 		const r = editRange(mode.base, toOut(toSrc(mode.minT) - ramp), toOut(toSrc(mode.maxT) + ramp));
-		await rerender(r.from, r.to, '畫筆');
+		await rerender(r.from, r.to, '畫筆', pianoroll.active === 'pitch' ? { start: mode.minT, end: mode.maxT } : undefined);
 		// 畫筆改的是曲線本身，選取的基準要跟著更新
 		if (selection) { selBase = curves.clone(); sessionPushed = false; resetParams(); }
 		return;
@@ -890,7 +948,7 @@ el.pianoroll.addEventListener('pointerup', async e => {
 	if (!selection || sameCurves(mode.base, curves)) return;
 	history.push(mode.base);
 	const r = editRange(mode.base, selection.start, selection.end);
-	await rerender(r.from, r.to, LANES[pianoroll.active].label);
+	await rerender(r.from, r.to, LANES[pianoroll.active].label, pianoroll.active === 'pitch' ? { ...selection } : undefined);
 	// 拖曳的結果併入基準，滑桿的參考點跟著往前走
 	selBase = curves.clone();
 	sessionPushed = false;
@@ -1004,7 +1062,7 @@ function syncParamLabels() {
  * 回不到原樣（舊版的問題）。全部參數都中性時，結果逐位元等於 selBase。
  */
 function applyParams() {
-	if (!curves || !selBase || !selection) return;
+	if (!curves || !selBase || !selection || workState.blocksEditing || aiRegions.length) return;
 	curves.pitch.set(selBase.pitch);
 	curves.gainDb.set(selBase.gainDb);
 	curves.formant.set(selBase.formant);
@@ -1051,13 +1109,14 @@ const sliders: { input: HTMLInputElement; key: keyof typeof params; label: strin
 for (const s of sliders) {
 	// 拖曳過程只更新曲線和畫面，不算繪——不然會卡成一團
 	s.input.addEventListener('input', () => {
+		if (workState.blocksEditing || aiRegions.length) return;
 		params[s.key] = parseFloat(s.input.value);
 		syncParamLabels();
 		applyParams();
 	});
 	// 放開才真的算繪
 	s.input.addEventListener('change', async () => {
-		if (!curves || !selBase || !selection) return;
+		if (!curves || !selBase || !selection || workState.blocksEditing || aiRegions.length) return;
 		applyParams();
 		if (!sessionPushed) {
 			if (sameCurves(selBase, curves)) return;   // 拉了又拉回中性，不必留一步 undo
@@ -1065,7 +1124,7 @@ for (const s of sliders) {
 			sessionPushed = true;
 		}
 		const r = editRange(selBase, selection.start, selection.end);
-		await rerender(r.from, r.to, s.label);
+		await rerender(r.from, r.to, s.label, ['shift', 'alpha'].includes(s.key) ? { ...selection } : undefined);
 	});
 }
 
@@ -1077,7 +1136,7 @@ for (const s of sliders) {
  * 中間的程度用 Formant 那條 lane 分段調就好，不必再開一個連續旋鈕。
  */
 async function setMode(follow: 0 | 1) {
-	if (busy) return;
+	if (workState.blocksEditing) return;
 	const changed = renderer.formantFollow !== follow;
 	renderer.formantFollow = follow;
 	el.modeVoice.classList.toggle('on', follow === 0);
@@ -1093,6 +1152,7 @@ el.modeInstrument.addEventListener('click', () => setMode(1));
 
 el.panel.querySelectorAll('[data-nudge]').forEach(btn => {
 	btn.addEventListener('click', () => {
+		if (aiRegions.length) { hint('AI 修音審核中：只能上下拖曳黃色框調整音高'); return; }
 		const amount = parseFloat((btn as HTMLElement).dataset.nudge!);
 		el.shift.value = String(Math.max(-12, Math.min(12, params.shift + amount)));
 		el.shift.dispatchEvent(new Event('input'));
@@ -1103,7 +1163,7 @@ el.panel.querySelectorAll('[data-nudge]').forEach(btn => {
 // 把選取範圍的編輯清掉，回到原始聲音
 document.querySelectorAll('[data-reset]').forEach(btn => {
 	btn.addEventListener('click', async () => {
-		if (!curves || !selection || busy) return;
+		if (!curves || !selection || workState.blocksEditing || aiRegions.length) return;
 		const which = (btn as HTMLElement).dataset.reset!;
 		const before = curves.clone();
 		// 只歸零曲線數值；錨點與伸縮不動。範圍換到原始時間，因為曲線存在那裡
@@ -1114,7 +1174,7 @@ document.querySelectorAll('[data-reset]').forEach(btn => {
 		if (sameCurves(before, curves)) { hint('這段本來就沒有這類編輯'); return; }
 		history.push(before);
 		const r = editRange(before, selection.start, selection.end);
-		await rerender(r.from, r.to, '歸零');
+		await rerender(r.from, r.to, '歸零', ['all', 'pitch'].includes(which) ? { ...selection } : undefined);
 		selBase = curves.clone();
 		sessionPushed = false;
 		resetParams();
@@ -1157,32 +1217,75 @@ el.ramp.addEventListener('change', () => {
 
 el.exportBtn.addEventListener('click', async () => {
 	if (!source) return;
-	// 背景精算還沒完成的話，匯出的會是有接縫的預覽版——等它算完
-	if (bgTimer || bgPendingRange || renderer.backgroundProgress !== null) {
-		hint('背景精算中，算完會自動匯出…');
-		await waitBackground();
-	}
-	const name = source.name.replace(/\.[^.]+$/, '') + '_wipitch.wav';
-	downloadBlob(encodeWav24(renderer.rendered, renderer.sampleRate), name);
-	hint(`已匯出 ${name}`);
+	const task = workState.tryBegin('export', '準備匯出 WAV');
+	if (!task) return;
+	try {
+		// 匯出期間禁止編輯，但背景精算仍可執行，避免彼此等待。
+		if (workState.has('background')) {
+			hint('背景精算中，算完會自動匯出…');
+			task.update('等待背景精算後匯出');
+			await waitBackground();
+		}
+		const name = source.name.replace(/\.[^.]+$/, '') + '_wipitch.wav';
+		task.update('編碼 WAV');
+		const wav = encodeWav24(renderer.rendered, renderer.sampleRate);
+  downloadBlob(wav, name);
+  try {
+   task.update('將暫存資料搬入 AI 訓練資料庫');
+   trainingStatus.textContent = '正在搬移 AI 訓練暫存資料…';
+   const committed = trainingAsset ? await commitTrainingStaging(trainingAsset.id) : { count:0, categories:{ manual:0, adjusted:0, rejected:0 } };
+   const saved = committed.count;
+   stagedTrainingCount = 0;
+   trainingStatus.textContent = saved
+    ? `AI 訓練資料：已搬移 ${saved} 筆（手動 ${committed.categories.manual}、人工調整 AI ${committed.categories.adjusted}）`
+    : 'AI 訓練資料：暫存目錄沒有目前音檔的待存記錄';
+   window.dispatchEvent(new CustomEvent('wipitch-training-committed'));
+   hint(`已啟動 ${name} 下載；${trainingStatus.textContent}`);
+   task.finish('WAV 下載已啟動，訓練資料儲存完成');
+  } catch (error) {
+   const message = `WAV 下載已啟動，但訓練資料未全部保存：${error instanceof Error ? error.message : String(error)}。請再次匯出以重試`;
+   trainingStatus.textContent = message;
+   hint(message); task.finish(message, true);
+  }
+	} catch (error) {
+		const message = `匯出失敗：${error instanceof Error ? error.message : String(error)}`;
+		hint(message); task.finish(message, true);
+	} finally { task.finish('匯出工作已結束'); }
 });
 
 el.saveBtn.addEventListener('click', () => {
-	if (!source || !curves) return;
+	if (!source || !curves || workState.blocksEditing) return;
+	if (!sourceAbsolutePath) {
+		hint('無法存檔：目前音訊沒有絕對路徑，請用「開啟音檔」重新選擇原始音訊');
+		return;
+	}
 	const name = source.name.replace(/\.[^.]+$/, '') + '.wipitch.json';
-	const text = serialize(curves, source.name, source.sampleRate, source.duration, renderer.formantFollow,
+	const text = serialize(curves, source.name, sourceAbsolutePath, source.sampleRate, source.duration, renderer.formantFollow,
 		ref.name ? { name: ref.name, gainDb: ref.gainDb, muted: ref.muted, offsetSec: ref.offsetSec } : undefined);
 	downloadBlob(new Blob([text], { type: 'application/json' }), name);
 	hint(`已存檔 ${name}`);
 });
 
 el.openProject.addEventListener('change', async () => {
+ if(aiRegions.length){hint('請先取消 AI 修正標示，再讀取專案');el.openProject.value='';return;}
 	const f = el.openProject.files?.[0];
-	if (!f || !source || !track) return;
-	const progress = progressView.begin('讀取專案');
+	if (!f) return;
+	let progress: WorkTask | null = null;
 	try {
-		const loaded = deserialize(await f.text(), source.sampleRate, track.length);
-		progress.finish('專案讀取完成');
+		const text = await f.text();
+		const projectSource = inspectProject(text);
+		if (projectSource.audioPath) {
+			hint(`正在依專案路徑開啟 ${projectSource.audioName}…`);
+			const audioFile = await readLocalAudio(projectSource.audioPath);
+			if (!await load(audioFile, projectSource.audioPath)) throw new Error('專案記錄的原始音訊載入失敗');
+		} else if (!source || !track) {
+			throw new Error('這是舊版專案，沒有保存音訊路徑；請先開啟對應的原始音檔，再重新讀檔');
+		}
+		if (!source || !track || !curves) throw new Error('原始音訊尚未完成載入');
+		progress = workState.tryBegin('project', '讀取專案');
+		if (!progress) throw new Error('目前工作尚未完成，請稍後再讀檔');
+		const loaded = deserialize(text, source.sampleRate, track.length);
+		progress.update('專案讀取完成，準備算繪');
 		history.push(curves!);
 		curves = loaded.curves;
 		// 模式是全域設定，也要跟著專案檔回來——不然讀檔後聲音會跟存檔前不一樣
@@ -1193,13 +1296,13 @@ el.openProject.addEventListener('change', async () => {
 		clearSelection();
 		selectedAnchors.clear();
 		// 曲線整個換掉了，只好整段重算
-		busy = true;
 		hint('讀檔：整段重新算繪中…（可能要十幾秒）');
 		view.duration = outDuration();
 		showProgress({ start: 0, end: outDuration() });
 		const t0 = performance.now();
 		await renderer.renderAll(curves);
 		player.setAudio(renderer.rendered, renderer.sampleRate);
+		manualBaseline = curves?.clone() ?? null;
 		let refNote = '';
 		const bgSaved = loaded.background;
 		if (bgSaved && bgSaved.name === ref.name) {
@@ -1212,13 +1315,14 @@ el.openProject.addEventListener('change', async () => {
 		}
 		hint(`讀檔完成（算繪 ${((performance.now() - t0) / 1000).toFixed(1)}s）${refNote}`);
 		finishRenderProgress('專案讀取與算繪完成');
+		progress.finish('專案讀取與算繪完成');
 	} catch (e) {
 		hint(`讀檔失敗：${(e as Error).message}`);
-		progress.finish(`讀檔失敗：${(e as Error).message}`, true);
+		progress?.finish(`讀檔失敗：${(e as Error).message}`, true);
 		finishRenderProgress(`讀檔失敗：${(e as Error).message}`, true);
 	} finally {
-		busy = false;
 		showProgress(null);
+		progress?.finish('專案讀取工作已結束');
 		el.openProject.value = '';
 	}
 });
@@ -1238,15 +1342,56 @@ function describeTarget(amount: number): string {
 	return `　→ 平均落在 ${midiToName(midi)} ${cents >= 0 ? '+' : ''}${cents} cents`;
 }
 
-async function rerender(fromSec: number, toSec: number, label: string) {
-	if (!curves) return;
-	busy = true;
+async function rerender(fromSec: number, toSec: number, label: string, manualRange?: { start: number; end: number }) {
+	if (!curves || !workState.canStart('render')) return;
 	hint(`${label}：算繪中…`);
 	showProgress({ start: Math.max(0, fromSec), end: toSec });
 	const t0 = performance.now();
+ const before = manualBaseline?.clone();
+ const sr = renderer.sampleRate;
+ const clipStart = manualRange ? Math.max(0, manualRange.start - 3) : 0;
+ const clipEnd = Math.min(manualRange ? manualRange.end + 3 : 0, renderer.rendered[0].length / sr);
+ const changedPitch = before && !sameArray(before.pitch, curves.pitch);
+ const exceedsTrainingLimit = !!manualRange && manualRange.end - manualRange.start > 5;
+ const touchesAI = !!manualRange && !!curves && aiRegions.some(r => toOut(Curves.frameToTime(r.from)) < manualRange.end && toOut(Curves.frameToTime(r.to)) > manualRange.start);
+ const capture = !!(manualRange && !touchesAI && !exceedsTrainingLimit && trainingAsset && changedPitch && clipEnd > clipStart && source && pitchMidi && curveVoiced);
+ const cut = () => renderer.rendered.map(channel => channel.slice(Math.round(clipStart * sr), Math.round(clipEnd * sr)));
+ const beforeAudio = capture ? cut() : [];
+ const afterCurves = curves.clone();
+ // Snapshot the visible selection before rendering; export must not reread the UI.
+ const keySelection = {
+  value: el.keyFilter.value,
+  label: el.keyFilter.selectedOptions[0]?.textContent ?? '全部音',
+  capturedAt: new Date().toISOString(),
+ };
+ const optionKey = KEY_OPTIONS.find(key => key.id === keySelection.value);
+ const selectedKey = optionKey ? { ...optionKey, pitchClasses: [...optionKey.pitchClasses] } : null;
+ const metadata = { asset: trainingAsset, operation: label, selection: selection ? { ...selection } : null,
+  keySelection,
+  editRange: manualRange, detectionRange: detectionBar.range ? { ...detectionBar.range } : null,
+  renderRange: { start: fromSec, end: toSec }, parameters: { ...params },
+  pen: { depth: el.vibDepth.value, rate: el.vibRate.value, onset: el.vibOnset.value, enabled: el.vibOn.checked },
+  pitchSlopeLimit: curves.pitchSlopeLimit, ramp: { ...curves.rampSec },
+  anchors: curves.timeMap.anchors.map(anchor => ({ ...anchor })), formantFollow: renderer.formantFollow,
+  audioStage: 'interactive-render-before-background-refinement' };
 	try {
 		await renderer.patch(curves, Math.max(0, fromSec), toSec);
 		player.setAudio(renderer.rendered, renderer.sampleRate);
+  manualBaseline = curves.clone();
+  for(const region of aiRegions) { syncAIRegion(region, curves); if(manualRange && region.edited && toOut(Curves.frameToTime(region.from)) < manualRange.end && toOut(Curves.frameToTime(region.to)) > manualRange.start) region.feedbackKey=keySelection; }
+  if (manualRange && changedPitch && exceedsTrainingLimit) {
+   trainingStatus.textContent = '本次修改範圍超過 5 秒，不記錄訓練資料；修音已完成';
+  }
+  if (capture) {
+   trainingStatus.textContent = '手動修音記錄：正在暫存本次修改…';
+   try {
+    const pair = await prepareTrainingPair({ before: before!, after: afterCurves, beforeAudio, afterAudio: cut(),
+     midi: pitchMidi!, voiced: curveVoiced!, start: clipStart, end: clipEnd, sampleRate: sr, key: selectedKey, metadata });
+    await stageTrainingPair(pair);
+    stagedTrainingCount++;
+    trainingStatus.textContent = `手動修音記錄：已暫存 ${stagedTrainingCount} 筆，資料位於 AI訓練暫存，匯出 WAV 時搬移`;
+   } catch (error) { trainingStatus.textContent = `手動修音記錄暫存失敗：${error instanceof Error ? error.message : error}；修音結果仍保留`; }
+  }
 		hint(`${label}：完成（${(performance.now() - t0).toFixed(0)}ms）`);
 		finishRenderProgress(`${label}算繪完成`);
 		scheduleBackground({ from: Math.max(0, fromSec), to: toSec });
@@ -1254,7 +1399,7 @@ async function rerender(fromSec: number, toSec: number, label: string) {
 		hint(`${label}：算繪失敗 ${(e as Error).message}`);
 		finishRenderProgress(`${label}算繪失敗：${(e as Error).message}`, true);
 	} finally {
-		busy = false;
+		finishRenderProgress('算繪工作已結束');
 		showProgress(null);
 	}
 }
@@ -1267,7 +1412,7 @@ async function rerender(fromSec: number, toSec: number, label: string) {
 let bgTimer = 0;
 /** 還沒處理的改動範圍（輸出秒）。連續編輯時合併起來，一次算完 */
 let bgPendingRange: { from: number; to: number } | null = null;
-let bgApplied = 0;   // 測試用：背景精算換上過幾次
+
 
 function scheduleBackground(changed: { from: number; to: number }) {
 	bgPendingRange = bgPendingRange
@@ -1283,15 +1428,18 @@ function scheduleBackground(changed: { from: number; to: number }) {
 async function runBackground() {
 	bgTimer = 0;
 	if (!curves || !bgPendingRange) return;
-	if (busy) { bgTimer = window.setTimeout(runBackground, 200); return; }
+	if (workState.blocksBackground) { bgTimer = window.setTimeout(runBackground, 200); return; }
 	const range = bgPendingRange;
 	bgPendingRange = null;
 	// 沒換上的話，要嘛是不需要精算，要嘛是被新的編輯取消了——那個編輯自己會再排一次
-	if (await renderer.renderBackground(curves, range)) {
-		player.setAudio(renderer.rendered, renderer.sampleRate);
-		bgApplied++;
-	}
-	syncBackgroundStatus();
+	try {
+		if (await renderer.renderBackground(curves, range)) {
+			player.setAudio(renderer.rendered, renderer.sampleRate);
+			diagnostics?.recordBackgroundApplied();
+		}
+	} catch (error) {
+		hint(`背景精算失敗：${error instanceof Error ? error.message : String(error)}`);
+	} finally { syncBackgroundStatus(); }
 }
 
 renderer.onBackground = syncBackgroundStatus;
@@ -1301,7 +1449,7 @@ function syncBackgroundStatus() {
 	el.bgStatus.hidden = p === null && !waiting;
 	el.bgText.textContent = p === null ? '背景精算（等待中）' : `背景精算 ${Math.round(p * 100)}%`;
 	if (p !== null || waiting) {
-		backgroundTask ??= progressView.begin('背景精算', 0);
+		backgroundTask ??= workState.begin('background', '背景精算');
 		backgroundTask.update(p === null ? '背景精算（等待中）' : '背景精算', p);
 	} else {
 		backgroundTask?.finish('背景精算已結束');
@@ -1311,7 +1459,7 @@ function syncBackgroundStatus() {
 
 /** 等背景精算全部結束（匯出前、測試用） */
 async function waitBackground() {
-	while (bgTimer || bgPendingRange || renderer.backgroundProgress !== null || busy) {
+	while (workState.has('background') || workState.blocksBackground) {
 		await new Promise(r => setTimeout(r, 100));
 	}
 }
@@ -1441,6 +1589,11 @@ el.refAmpZoom.addEventListener('dblclick', () => setRefAmpZoom(1));
 el.refwave.addEventListener('pointerdown', e => {
 	if (!source) return;
 	const t = Math.max(0, Math.min(outDuration(), view.xToTime(e.clientX - el.refwave.getBoundingClientRect().left)));
+	if (aiRegions.length) {
+		player.seek(t);
+		hint('AI 修音審核中：只能上下拖曳黃色框調整音高');
+		return;
+	}
 	if (!e.shiftKey) selectedAnchors.clear();
 	// 畫筆模式不建立選取，點一下只定位播放頭
 	if (tool === 'pen') { player.seek(t); return; }
@@ -1479,31 +1632,31 @@ function syncRefUi() {
 }
 
 async function loadReference(file: File) {
-	const progress = progressView.begin('讀取參考音軌');
+	const progress = workState.tryBegin('reference', '讀取參考音軌');
+	if (!progress) { hint('目前工作尚未完成，請稍後載入參考音軌。'); return; }
 	hint(`載入參考音軌 ${file.name}…`);
-	let audio;
 	try {
-		audio = await decodeAudio(file, (stage, fraction) => progress.update(`參考音軌：${stage}`, fraction));
+		const audio = await decodeAudio(file, (stage, fraction) => progress.update(`參考音軌：${stage}`, fraction));
+
+		player.setBackground(audio.channels, audio.sampleRate);
+		refWave.setAudio(audio.channels, audio.sampleRate);
+		ref.name = audio.name;
+		if (pendingRefSettings && pendingRefSettings.name === audio.name) {
+			ref.gainDb = pendingRefSettings.gainDb;
+			ref.muted = pendingRefSettings.muted;
+			ref.offsetSec = pendingRefSettings.offsetSec;
+			pendingRefSettings = null;
+		}
+		applyRefToPlayer();
+		progress.finish('參考音軌讀取完成');
+		const mainDur = outDuration();
+		hint(source && Math.abs(audio.duration - mainDur) > 0.5
+			? `參考音軌 ${fmtTime(audio.duration)} / 主唱 ${fmtTime(mainDur)}，長度不同，可能要調 offset`
+			: `已載入參考音軌 ${audio.name}`);
 	} catch (e) {
 		hint(`解不開參考音檔：${(e as Error).message}`);
 		progress.finish(`參考音軌讀取失敗：${(e as Error).message}`, true);
-		return;
-	}
-	player.setBackground(audio.channels, audio.sampleRate);
-	refWave.setAudio(audio.channels, audio.sampleRate);
-	ref.name = audio.name;
-	if (pendingRefSettings && pendingRefSettings.name === audio.name) {
-		ref.gainDb = pendingRefSettings.gainDb;
-		ref.muted = pendingRefSettings.muted;
-		ref.offsetSec = pendingRefSettings.offsetSec;
-		pendingRefSettings = null;
-	}
-	applyRefToPlayer();
-	progress.finish('參考音軌讀取完成');
-	const mainDur = outDuration();
-	hint(source && Math.abs(audio.duration - mainDur) > 0.5
-		? `參考音軌 ${fmtTime(audio.duration)} / 主唱 ${fmtTime(mainDur)}，長度不同，可能要調 offset`
-		: `已載入參考音軌 ${audio.name}`);
+	} finally { progress.finish('參考音軌讀取工作已結束'); }
 }
 
 function removeReference() {
@@ -1579,416 +1732,234 @@ function editedPitchRange(): { from: number; to: number } | null {
 	return lo < 0 ? null : { from: toOut(Curves.frameToTime(lo)), to: toOut(Curves.frameToTime(hi + 1)) };
 }
 
-// 測試用：直接把播放頭放到指定秒數（正常操作是點波形軌）
-(window as any).__seekForTest = (sec: number) => player.seek(sec);
-
-// 開發／測試用的內部狀態查詢窗口
-/** 測試用：畫面 x 位置上某條 lane 的值；pitch 另外回傳絕對音高（未發聲為 null） */
-(window as any).__laneAtX = (id: LaneId, x: number) => {
-	if (!curves) return null;
-	const t = toSrc(view.xToTime(x));
-	const i = Curves.timeToFrame(t);
-	const v = curves.valueAt(id, t);
-	const abs = id === 'pitch' && pitchMidi && curveVoiced && curveVoiced[i] ? pitchMidi[i] + curves.pitch[i] : null;
-	return { v, abs };
-};
-
-function pitchStepIn(fromOut: number, toOut_: number) {
-	if (!curves || !curveVoiced) return null;
-	const i0 = Math.max(1, Curves.timeToFrame(toSrc(fromOut))), i1 = Math.min(curves.length, Curves.timeToFrame(toSrc(toOut_)));
-	let max = 0, unvoiced = 0;
-	for (let i = i0; i < i1; i++) {
-		max = Math.max(max, Math.abs(curves.pitch[i] - curves.pitch[i - 1]));
-		if (!curveVoiced[i]) unvoiced++;
-	}
-	return { max: +max.toFixed(4), unvoiced };
-}
-
-(window as any).__debug = () => {
-	if (!curves || !source) return null;
-	let maxDelta = 0, edited = 0;
-	for (let i = 0; i < curves.length; i++) {
-		const d = Math.abs(curves.pitch[i]);
-		if (d > 1e-9) edited++;
-		if (d > maxDelta) maxDelta = d;
-	}
-	// 算繪結果跟原始音訊差多少，用來確認聲音真的被改過
-	let diff = 0, refEnergy = 0;
-	const a = source.channels[0], b = renderer.rendered[0];
-	for (let i = 0; i < a.length; i += 97) { const d = a[i] - b[i]; diff += d * d; refEnergy += a[i] * a[i]; }
-	return {
-		maxDelta: +maxDelta.toFixed(3),
-		editedFrames: edited,
-		editedSeconds: +(edited * CURVE_HOP_SEC).toFixed(2),
-		renderDiffRatio: +(Math.sqrt(diff / (refEnergy + 1e-20))).toFixed(4),
-		historyDepth: history.depth,
-		redoDepth: history.redoDepth,
-		/** 選取範圍內「音高圍繞平滑中心線的起伏」標準差（半音）。壓平之後應該要變小。 */
-		wobble: selection ? wobbleIn(selection.start, selection.end) : null,
-		/** 選取範圍內音高的整體標準差（半音）。α=0 壓成單一音高之後應該接近 0。 */
-		spread: selection ? spreadIn(selection.start, selection.end) : null,
-		/** 只看選取範圍內的編輯量（maxDelta 是整個檔案的，測局部功能時會被別處的編輯干擾） */
-		selMaxDelta: selection ? maxDeltaIn(selection.start, selection.end) : null,
-		selMaxGainDb: selection ? maxAbsIn('gain', selection.start, selection.end) : null,
-		selMaxFormant: selection ? maxAbsIn('formant', selection.start, selection.end) : null,
-		/** 選取範圍內相鄰曲線格音高偏移的最大差（半音）與其中未發聲的格數 */
-		selPitchStep: selection ? pitchStepIn(selection.start, selection.end) : null,
-		pitchSlopeLimit: curves.pitchSlopeLimit,
-		activeLane: pianoroll.active,
-		formantFollow: renderer.formantFollow,
-		progressTicks,
-		vibOn: el.vibOn.checked,
-		vibDepth: parseFloat(el.vibDepth.value),
-		vibOnsetOn: el.vibOnsetOn.checked,
-		vibOnsetMs: parseFloat(el.vibOnset.value),
-		/** 目前這條 lane 的縱軸可視範圍，測試縱向縮放／捲動用 */
-		vRange: pianoroll.rangeOf(pianoroll.active),
-		hSpanSec: +(el.pianoroll.clientWidth * view.secPerPx).toFixed(3),
-		startSec: +view.startSec.toFixed(3),
-		following: followPlayhead,
-		/** 播放頭位置（秒）。時鐘是下一個動畫幀才更新，測試要看這個才不會讀到舊值 */
-		playhead: +player.position.toFixed(3),
-		looping: !!player.loopRegion,
-		selection,
-		anchors: curves.timeMap.anchors.map(a => ({ id: a.id, src: +a.src.toFixed(4), out: +a.out.toFixed(4) })),
-		selectedAnchors: [...selectedAnchors],
-		outDuration: +outDuration().toFixed(4),
-		renderedSec: +(renderer.rendered[0].length / renderer.sampleRate).toFixed(4),
-		bgProgress: renderer.backgroundProgress,
-		bgWaiting: !!bgTimer || !!bgPendingRange,
-		bgVisible: !el.bgStatus.hidden,
-		bgApplied,
-		/** 背景參考音軌 */
-		reference: {
-			name: ref.name, duration: +player.backgroundDuration.toFixed(3),
-			gainDb: ref.gainDb, muted: ref.muted, offsetSec: ref.offsetSec,
-			playerGain: +player.backgroundGain.toFixed(4), nodeActive: player.backgroundNodeActive,
-		},
-		playing: player.isPlaying,
-		ampZoom: +waveform.ampZoom.toFixed(3),
-		refAmpZoom: +refWave.ampZoom.toFixed(3),
-		waveHeight: el.waveform.clientHeight,
-		refHeight: el.refwave.clientHeight,
-		pianoHeight: el.pianoroll.clientHeight,
-		/** 最近一次背景串流的範圍與兩端接縫的音量（dB，相對整檔最大音量） */
-		bgStream: renderer.lastStream && {
-			from: +renderer.lastStream.from.toFixed(3),
-			to: +renderer.lastStream.to.toFixed(3),
-			fromDb: +renderer.levelDbAt(renderer.lastStream.from).toFixed(1),
-			toDb: +renderer.levelDbAt(renderer.lastStream.to).toFixed(1),
-		},
-	};
-};
-
-/** 測試用：等背景精算全部結束 */
-(window as any).__waitBackground = waitBackground;
-
-/**
- * 測試用：記下目前算繪結果的某一段（輸出時間），之後拿來比對。
- * 「歸零之後要回到同樣的聲音」這種驗收需要它。
- */
-const renderSnaps = new Map<string, Float32Array>();
-(window as any).__snapRendered = (name: string, fromSec: number, toSec: number) => {
-	const sr = renderer.sampleRate;
-	const snap = renderer.rendered[0].slice(Math.round(fromSec * sr), Math.round(toSec * sr));
-	renderSnaps.set(name, snap);
-	return snap.length;
-};
-/**
- * 測試用：目前算繪結果（從 fromSec 起）與快照比較。
- *
- * corr / relErr 是逐 sample 的——只適合「應該完全相同」的情況（搬移、還原原始音訊）。
- * 有伸縮的段落從不同位置開始算，相位聲碼器的相位本來就不同，聽起來一樣但波形對不起來，
- * 那種情況要看 specCorr：每 20ms 一窗的幅度頻譜（log）相關係數的平均。
- */
-(window as any).__compareSnap = (name: string, fromSec: number) => {
-	const snap = renderSnaps.get(name);
-	if (!snap) return null;
-	const sr = renderer.sampleRate, b = renderer.rendered[0], o = Math.round(fromSec * sr);
-	let dot = 0, a2 = 0, b2 = 0, d2 = 0;
-	for (let i = 0; i < snap.length; i++) {
-		const x = snap[i], y = b[o + i] ?? 0;
-		dot += x * y; a2 += x * x; b2 += y * y; d2 += (x - y) ** 2;
-	}
-	// 伸縮段重算之後可能有幾毫秒的時間偏移；分開報「對齊時」與「±10ms 內最佳」才看得出是哪一種差異
-	let best = { off: 0, c: -2 };
-	for (let offMs = -10; offMs <= 10; offMs += 2) {
-		const s = o + Math.round(offMs / 1000 * sr);
-		const c = spectralCorr(snap, b.subarray(Math.max(0, s), Math.max(0, s) + snap.length), sr);
-		if (c > best.c) best = { off: offMs, c };
-	}
-	return {
-		corr: +(dot / Math.sqrt(a2 * b2 + 1e-20)).toFixed(5),
-		relErr: +Math.sqrt(d2 / (a2 + 1e-20)).toFixed(5),
-		specCorr: +spectralCorr(snap, b.subarray(o, o + snap.length), sr).toFixed(4),
-		bestSpecCorr: +best.c.toFixed(4),
-		bestOffsetMs: best.off,
-	};
-};
-
-/** 測試用：什麼都不改，單純重算一段（量「重算本身」造成的差異當基準） */
-(window as any).__rerenderForTest = (fromSec: number, toSec: number) => rerender(fromSec, toSec, '測試重算');
-
-/** 兩段音訊的 log 幅度頻譜相關（每 20ms 一窗、1024 點 Hann、只取有聲音的窗） */
-function spectralCorr(x: Float32Array, y: Float32Array, sr: number): number {
-	const N = 1024, hop = Math.round(sr * 0.02), bins = 200;   // 只看 0 ~ 約 9kHz
-	const win = new Float32Array(N).map((_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N));
-	const mag = (s: Float32Array, off: number) => {
-		const m = new Float32Array(bins);
-		for (let k = 1; k <= bins; k++) {
-			let re = 0, im = 0;
-			const w = 2 * Math.PI * k / N;
-			for (let i = 0; i < N; i++) { const v = (s[off + i] ?? 0) * win[i]; re += v * Math.cos(w * i); im -= v * Math.sin(w * i); }
-			m[k - 1] = Math.log(Math.hypot(re, im) + 1e-6);
-		}
-		return m;
-	};
-	let sum = 0, count = 0;
-	for (let off = 0; off + N <= Math.min(x.length, y.length); off += hop) {
-		let e = 0;
-		for (let i = 0; i < N; i++) e += x[off + i] ** 2;
-		if (Math.sqrt(e / N) < 0.005) continue;   // 靜音的窗沒有意義
-		const p = mag(x, off), q = mag(y, off);
-		const mp = p.reduce((s, v) => s + v, 0) / bins, mq = q.reduce((s, v) => s + v, 0) / bins;
-		let pq = 0, pp = 0, qq = 0;
-		for (let k = 0; k < bins; k++) { const a = p[k] - mp, b = q[k] - mq; pq += a * b; pp += a * a; qq += b * b; }
-		sum += pq / Math.sqrt(pp * qq + 1e-20); count++;
-	}
-	return count ? sum / count : 0;
-}
-/** 測試用：輸出時間 ↔ 畫面 x */
-(window as any).__timeToX = (t: number) => view.timeToX(t);
-/** 測試用：直接換上一組錨點（[src, out] 秒），走跟拖曳錨點一樣的路徑（記 undo、搬移、重算） */
-(window as any).__stretchForTest = async (pairs: [number, number][]) => {
-	if (!curves) return null;
-	const before = curves.clone();
-	curves.timeMap = new TimeMap(pairs.map(([src, out], i) => ({ id: i + 1, src, out })));
-	history.push(before);
-	remapSelection(before.timeMap, curves.timeMap);
-	const dirty = applyTimeMap();
-	if (dirty) await rerender(dirty.from, dirty.to, '伸縮');
-	return dirty;
-};
-
-/** 測試用：在原始時間 [fromSrc, toSrc) 疊加移調 semis 與正弦抖音（原始時間上的 vibHz） */
-(window as any).__pitchEditForTest = async (fromSrc: number, toSrc: number, semis: number, vibDepth: number, vibHz: number) => {
-	if (!curves) return;
-	history.push(curves);
-	const before = curves.clone();
-	for (let i = Curves.timeToFrame(fromSrc); i < Curves.timeToFrame(toSrc); i++) {
-		curves.pitch[i] += semis + vibDepth * Math.sin(2 * Math.PI * vibHz * Curves.frameToTime(i));
-	}
-	void before;
-	await rerender(toOut(fromSrc) - 0.2, toOut(toSrc) + 0.2, '測試移調');
-};
-
-/**
- * 測試用：伸縮後的聲音「實際」音高，跟「原本的音高曲線（+ 編輯）沿著時間對應拉長」差多少。
- *
- * 把輸出 [fromOut, toOut) 重取樣成 16kHz 重新跑 SwiftF0，逐格比較。
- * control 是故意不做時間對應（假裝沒伸縮）的誤差，用來確認這個量法分得出對錯。
- */
-(window as any).__pitchCompare = async (fromOut: number, toOut: number) => {
-	if (!curves || !track || !pitchMidi) return null;
-	const sr = renderer.sampleRate;
-	const a = Math.round(fromOut * sr), b = Math.round(toOut * sr), n = b - a;
-	const off = new OfflineAudioContext(1, Math.ceil(n / sr * 16000), 16000);
-	const buf = off.createBuffer(renderer.rendered.length, n, sr);
-	renderer.rendered.forEach((c, i) => buf.copyToChannel(c.subarray(a, b), i));
-	const node = off.createBufferSource();
-	node.buffer = buf; node.connect(off.destination); node.start();
-	const mono = (await off.startRendering()).getChannelData(0).slice();
-	const det = await detectPitch(mono);
-
-	const map = curves.timeMap;
-	/** 原本的音高（+ 編輯）在原始時間 tSrc 的值；兩側格子都發聲才內插 */
-	/** 偵測格位置 pos（可以有小數）上的音高 + 編輯，在曲線格之間線性內插 */
-	const curvePitchAt = (pos: number): number => {
-		const k = pos * CURVE_SUB, k0 = Math.floor(k), g = k - k0;
-		const at = (j: number) => pitchMidi![j] + curves!.pitch[j];
-		return k0 + 1 < curves!.length ? at(k0) * (1 - g) + at(k0 + 1) * g : at(Math.min(k0, curves!.length - 1));
-	};
-	const expectedAt = (tSrc: number): number | null => {
-		const pos = (tSrc * 16000 - CENTER_OFFSET) / HOP;
-		const i0 = Math.floor(pos);
-		if (i0 < 0 || i0 + 1 >= track!.length || !track!.voiced[i0] || !track!.voiced[i0 + 1]) return null;
-		return curvePitchAt(pos);
-	};
-	const errs: number[] = [], control: number[] = [];
-	let origOnly = 0, newOnly = 0, both = 0;
-	for (let j = 0; j < det.length; j++) {
-		const tOut = fromOut + frameTime(j);
-		if (tOut < fromOut + 0.3 || tOut > toOut - 0.3) continue;   // 偵測器在片段兩端缺前後文
-		const exp = expectedAt(map.outToSrc(tOut));
-		const nv = !!det.voiced[j];
-		if (exp === null) { if (nv) newOnly++; continue; }
-		if (!nv) { origOnly++; continue; }
-		both++;
-		const got = hzToMidi(det.f0[j]);
-		errs.push((got - exp) * 100);
-		const ctl = expectedAt(tOut);
-		if (ctl !== null) control.push((got - ctl) * 100);
-	}
-	const stats = (x: number[]) => {
-		if (!x.length) return null;
-		const abs = x.map(Math.abs).sort((p, q) => p - q);
-		const q = (p: number) => +abs[Math.min(abs.length - 1, Math.floor(p * abs.length))].toFixed(1);
-		return {
-			n: x.length, median: q(0.5), p90: q(0.9), over50: +(abs.filter(v => v > 50).length / abs.length).toFixed(3),
-			bias: +(x.reduce((s, v) => s + v, 0) / x.length).toFixed(1),
-		};
-	};
-	return { mapped: stats(errs), control: stats(control), voicing: { both, origOnly, newOnly } };
-};
-
-/** 測試用：直接設定橫向視野（前面的測試會改縮放與捲動，後面的測試需要一個確定的起點） */
-(window as any).__setView = (startSec: number, spanSec: number) => {
-	view.secPerPx = spanSec / (el.pianoroll.clientWidth || 1200);
-	view.startSec = Math.max(0, startSec);
-};
-
-/** 選取範圍（含兩端斜坡）內的最大 |pitch| */
-function maxDeltaIn(fromSec: number, toSec: number): number {
-	return maxAbsIn('pitch', fromSec, toSec);
-}
-
-function maxAbsIn(id: LaneId, fromSec: number, toSec: number): number {
-	if (!curves) return 0;
-	const a = curves.lane(id);
-	const pad = Math.ceil(0.1 / CURVE_HOP_SEC);   // 要涵蓋編輯的斜坡尾巴
-	const i0 = Math.max(0, Curves.timeToFrame(toSrc(fromSec)) - pad);
-	const i1 = Math.min(curves.length, Curves.timeToFrame(toSrc(toSec)) + pad);
-	let m = 0;
-	for (let i = i0; i < i1; i++) m = Math.max(m, Math.abs(a[i]));
-	return +m.toFixed(4);
-}
-
-/**
- * 量一段範圍內音高的「抖動幅度」：先減掉移動中位數的中心線，再取標準差。
- * 減中心線是必要的——不然旋律走向會被算成抖動。
- */
-function wobbleIn(fromSec: number, toSec: number): number | null {
-	const vals = editedPitchIn(fromSec, toSec);
-	if (!vals || vals.length < 8) return null;
-	const half = 6;   // ±6 格 ≈ 200ms 的視窗
-	let sum = 0;
-	for (let k = 0; k < vals.length; k++) {
-		const win = vals.slice(Math.max(0, k - half), Math.min(vals.length, k + half + 1)).sort((a, b) => a - b);
-		const d = vals[k] - win[win.length >> 1];
-		sum += d * d;
-	}
-	return +Math.sqrt(sum / vals.length).toFixed(4);
-}
-
-/** 整段音高的標準差（不減中心線）。壓成單一音高之後應該接近 0。 */
-function spreadIn(fromSec: number, toSec: number): number | null {
-	const vals = editedPitchIn(fromSec, toSec);
-	if (!vals || vals.length < 8) return null;
-	const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-	const v = vals.reduce((a, b) => a + (b - mean) * (b - mean), 0) / vals.length;
-	return +Math.sqrt(v).toFixed(4);
-}
-
-/** 選取範圍內「套用編輯之後」的音高（MIDI），只取發聲的格子 */
-function editedPitchIn(fromSec: number, toSec: number): number[] | null {
-	if (!curveVoiced || !curves || !pitchMidi) return null;
-	// 取樣間隔維持 16ms，量出來的統計量才跟以前的測試基準一致
-	const i0 = Curves.timeToFrame(toSrc(fromSec)), i1 = Curves.timeToFrame(toSrc(toSec));
-	const vals: number[] = [];
-	for (let i = i0; i < i1 && i < curves.length; i += CURVE_SUB) {
-		if (curveVoiced[i]) vals.push(pitchMidi[i] + curves.pitch[i]);
-	}
-	return vals;
-}
-
 // ── 畫面更新 ────────────────────────────────────────────────────────────
 
 const aiButton = document.getElementById('ai-correct') as HTMLButtonElement;
 const aiUndo = document.getElementById('ai-undo') as HTMLButtonElement;
+const aiClear = document.getElementById('ai-clear-marks') as HTMLButtonElement;
+const aiOverlay = new AIRegionOverlay(document.getElementById('pianoroll-wrap')!, async (region, enabled, offset) => {
+ if(!curves || !workState.canStart('render')) return;
+ const task=workState.tryBegin('render','更新 AI 修正區域'); if(!task)return;
+ const feedbackKey={value:el.keyFilter.value,label:el.keyFilter.selectedOptions[0]?.textContent??'全部音',capturedAt:new Date().toISOString()};
+ const before=curves.clone(), next=regionCurves(curves,region,enabled,offset);
+ try {
+  player.pause();
+  await renderer.patch(next,toOut(Curves.frameToTime(region.from)),toOut(Curves.frameToTime(region.to)));
+  history.push(before);curves=next;manualBaseline=next.clone();
+  region.enabled=enabled;region.feedbackKey=feedbackKey;
+  if(enabled){region.offset=offset;region.adjusted=next.pitch.slice(region.from,region.to);region.edited=region.adjusted.some((v,i)=>Math.abs(v-region.ai[i])>1e-6);region.feedbackType=region.edited?'adjusted':undefined;}
+  else{resetAIRegionToAI(region);region.feedbackType='rejected';}
+  selBase=selection?curves.clone():null;sessionPushed=false;resetParams();
+  player.setAudio(renderer.rendered,renderer.sampleRate);
+  task.finish('AI 區域已更新');
+ } catch(error){task.finish(String(error),true);aiStatus.textContent=String(error);}
+ finally{aiPreviewCurves=null;task.finish('AI 區域更新結束');}
+},(region,enabled,offset)=>{
+ if(!region||!curves){aiPreviewCurves=null;return;}
+ aiPreviewCurves=regionCurves(curves,region,enabled??region.enabled,offset??region.offset);
+});
+aiClear.addEventListener('click',async()=>{
+ if(!curves || !aiReview || !trainingAsset || workState.isBusy)return;
+ const task=workState.tryBegin('render','整理 AI 修正回饋');if(!task)return;
+ try {
+  for(const region of aiRegions)syncAIRegion(region,curves);
+  // 不從曲線差異推測使用者意圖；只保存黃框互動明確留下的分類。
+  const feedback=reviewedAIRegions(aiRegions),untouched=aiRegions.length-feedback.length;let rejectedSaved=0,adjustedStaged=0,skipped=0;
+  for(const region of feedback){
+   const range={start:toOut(Curves.frameToTime(region.from)),end:toOut(Curves.frameToTime(region.to))};
+   if(range.end-range.start>5){skipped++;continue;}
+   const audio=aiReview.audio.get(region.id);if(!audio){skipped++;continue;}
+   task.update(`保存 AI 修正回饋 ${rejectedSaved+adjustedStaged+1}/${feedback.length}`);
+   const sr=renderer.sampleRate;
+   const feedbackType=region.feedbackType!;
+   const pair=await prepareTrainingPair({before:aiReview.curves,after:curves,beforeAudio:audio.channels,
+    afterAudio:renderer.rendered.map(c=>c.slice(Math.round(audio.start*sr),Math.round(audio.end*sr))),
+    midi:pitchMidi!,voiced:curveVoiced!,start:audio.start,end:audio.end,sampleRate:sr,
+    key:KEY_OPTIONS.find(k=>k.id===(region.feedbackKey?.value ?? aiReview!.input.key.id))??null,
+    metadata:{asset:trainingAsset,operation:feedbackType==='adjusted'?'AI 修正後人工調整':'取消 AI 修正',editRange:range,
+     keySelection:region.feedbackKey ?? {value:aiReview.input.key.id,label:aiReview.keyLabel},
+     aiKey:aiReview.input.key,aiKeyLabel:aiReview.keyLabel,feedbackType,
+     correctionKind:region.kind,aiLevel:aiReview.input.level,manualOffset:region.offset,
+     audioComparison:'before=AI proposal; after=user accepted result',
+     originalPitch:Array.from(aiReview.input.curves.pitch.slice(region.from,region.to)),
+     detectionRange:aiReview.input.range,selection:range}});
+   pair.metadata.recordId=region.recordId;
+   if(feedbackType==='adjusted'){await stageTrainingPair(pair);adjustedStaged++;}
+   else{await storeRejectedTrainingPair(pair);rejectedSaved++;}
+   // Completed records are finalized individually, so retries cannot reuse stale feedback.
+   aiRegions=aiRegions.filter(r=>r.id!==region.id);aiOverlay.clear();
+  }
+  aiRegions=[];aiReview=null;aiOverlay.clear();
+  trainingStatus.textContent=feedback.length
+   ? `取消修正已正式保存 ${rejectedSaved} 筆；人工調整已暫存 ${adjustedStaged} 筆；未操作黃框 ${untouched} 筆不記錄${skipped?`；略過 ${skipped} 筆（超過 5 秒或無可用音訊）`:''}${adjustedStaged?'，匯出 WAV 時保存人工調整資料':''}`
+   : `沒有取消勾選或人工重新調整的黃框；${untouched} 筆未操作黃框不建立訓練記錄`;
+  task.finish('AI 修正標示已取消，聲音保留目前狀態');
+ }catch(error){task.finish(String(error),true);trainingStatus.textContent=`回饋保存失敗，黃框保留供重試：${String(error)}`;}
+ finally{task.finish('AI 回饋工作結束');}
+});
+
 const aiCancel = document.getElementById('ai-cancel') as HTMLButtonElement;
 const aiLevel = document.getElementById('ai-strength') as HTMLInputElement;
 const aiStatus = document.getElementById('ai-status')!;
 const aiSettingsButton = document.getElementById('ai-settings-open') as HTMLButtonElement;
 const aiSettings = new AISettingsView(document.getElementById('ai-settings-dialog') as HTMLDialogElement, () => {
 	document.getElementById('ai-service')!.textContent = aiSettings.label;
-	aiStatus.textContent = '設定已套用；調整程度後按 AI 修正';
+		aiStatus.textContent = aiSettings.ready ? '設定已套用；調整程度後按 AI 修正' : aiSettings.label;
+		updateAIStrengthText();
+		syncAIControls();
 });
 document.getElementById('ai-service')!.textContent = aiSettings.label;
-let aiAbort: AbortController | null = null;
+void (async () => {
+	aiSettings.setBuiltinAIState(false, '正在檢查本機訓練資料');
+	try {
+		const result = await updateBuiltinAIModel();
+		const counts = result.model.counts;
+		aiSettings.setBuiltinAIState(true, `${counts.used} 筆可用${result.updated ? '，模型已更新' : '，模型為最新'}`);
+		if (aiSettings.settings.provider === 'builtin-ai') aiStatus.textContent = `內建 AI 已就緒：手動 ${counts.manual}、拒絕 ${counts.rejected}、再次調整 ${counts.adjusted}，實際採用 ${counts.used} 筆`;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		aiSettings.setBuiltinAIState(false, `無法使用：${message}`);
+		if (aiSettings.settings.provider === 'builtin-ai') aiStatus.textContent = `內建 AI 無法使用：${message}`;
+	}
+})();
+const aiFlow = new AICorrectionFlow({
+	workState,
+	pausePlayback: () => { player.pause(); syncPlayButton(); },
+	sameCurves,
+	render: (next, range) => renderer.patch(next, range.start, range.end),
+	pushHistory: before => history.push(before),
+	commitCurves: next => {
+		curves = next;
+		manualBaseline = next.clone();
+		selBase = selection ? next.clone() : null;
+		sessionPushed = false;
+		resetParams();
+	},
+	updatePlayback: () => player.setAudio(renderer.rendered, renderer.sampleRate),
+	scheduleBackground: range => scheduleBackground({ from: range.start, to: range.end }),
+	collectNotes: collectCorrectionNotesParallel,
+});
 aiSettingsButton.addEventListener('click', () => aiSettings.open());
-aiLevel.addEventListener('input', () => {
-	document.getElementById('ai-strength-value')!.textContent = `${aiLevel.value} / 10`;
-	aiLevel.setAttribute('aria-valuetext', `${aiLevel.value} 級，修正音符中心偏差的 ${Number(aiLevel.value) * 10}%`);
-});
+function updateAIStrengthText() {
+	const level = Number(aiLevel.value), output = document.getElementById('ai-strength-value')!;
+	if (aiSettings.settings.provider === 'rules') {
+		const cents = (11 - level) * 5;
+		output.textContent = `${level} / 10 · ≥${cents}¢`;
+		aiLevel.title = `傳統模式第 ${level} 級：偏差至少 ${cents} cents 才修正；入選後完整移向目標音高。`;
+		aiLevel.setAttribute('aria-valuetext', `${level} 級，修正偏差至少 ${cents} cents 的音符`);
+	} else {
+		output.textContent = `${level} / 10 · ${level * 10}%`;
+		aiLevel.title = `AI 模式第 ${level} 級：將模型選中的音符中心向目標修正 ${level * 10}%。`;
+		aiLevel.setAttribute('aria-valuetext', `${level} 級，修正音符中心偏差的 ${level * 10}%`);
+	}
+}
+aiLevel.addEventListener('input', updateAIStrengthText);
+updateAIStrengthText();
 aiUndo.addEventListener('click', async () => {
-	await undo();
-	aiStatus.textContent = el.hint.textContent;
+	if (!curves || !aiReview || workState.isBusy) return;
+	const task=workState.tryBegin('render','取消 AI 修改');if(!task)return;
+	const target=aiReview.input.curves.clone();
+	try {
+		player.pause();syncPlayButton();
+		task.update('還原 AI 修音前資料');
+		await renderer.patch(target,aiReview.input.range.start,aiReview.input.range.end);
+		curves=target;manualBaseline=target.clone();history.truncate(aiReview.historyDepth);
+		aiRegions=[];aiReview=null;aiOverlay.clear();clearSelection();selectedAnchors.clear();
+		player.setAudio(renderer.rendered,renderer.sampleRate);resetParams();syncToolbar();
+		aiStatus.textContent='已取消 AI 修改，整個音頻已回復到 AI 調音前';
+		hint('已取消 AI 修改，整個音頻已回復到 AI 調音前');
+		task.finish('AI 修改已取消');
+	}catch(error){const message=`取消 AI 修改失敗：${error instanceof Error?error.message:String(error)}`;aiStatus.textContent=message;task.finish(message,true);}
+	finally{task.finish('取消 AI 修改工作結束');syncAIControls();}
 });
-aiCancel.addEventListener('click', () => { aiAbort?.abort(); aiCancel.disabled = true; });
+aiCancel.addEventListener('click', () => { if (aiFlow.cancel()) aiCancel.disabled = true; });
 
 function syncAIControls() {
-	const locked = aiWorking || busy || loadGuard.busy || progressView.isBusy;
+	const locked = workState.isBusy;
 	const range = detectionBar.range;
-	aiButton.disabled = locked || !aiReady || !curves || !pitchMidi || !curveVoiced || !el.keyFilter.value || !range || range.end <= range.start;
-	aiButton.title = !el.keyFilter.value ? '請先選擇 Key（不能是全部音）' : !range || range.end <= range.start ? '請先在檢測列標示範圍' : '只修正檢測範圍；修正後可播放試聽或回復上一步';
-	aiUndo.disabled = locked || !aiReady || history.depth === 0;
+	aiClear.disabled = locked || !aiRegions.length;
+	aiButton.disabled = !!aiRegions.length || locked || !aiReady || !aiSettings.ready || !curves || !pitchMidi || !curveVoiced || !el.keyFilter.value || !range || range.end <= range.start;
+	aiButton.title = aiRegions.length ? '請先取消目前 AI 修正標示，再執行下一次 AI 修正' : !el.keyFilter.value ? '請先選擇 Key（不能是全部音）' : !range || range.end <= range.start ? '請先在檢測列標示範圍' : '只修正檢測範圍；修正後可逐框審核或取消整次 AI 修改';
+	aiUndo.disabled = locked || !aiReady || !aiReview || !aiRegions.length;
+	aiUndo.title = aiRegions.length ? '放棄本次 AI 修音及黃框內人工調整，回復 AI 執行前的完整音頻' : '目前沒有可取消的 AI 修改';
+	el.toolSelect.disabled=el.toolPen.disabled=!!aiRegions.length||locked;
 	aiSettingsButton.disabled = aiLevel.disabled = locked;
+	syncToolbar();
 }
 
 aiButton.addEventListener('click', async () => {
-	if (aiButton.disabled || !source || !curves || !pitchMidi || !curveVoiced || drag) return;
+	if (aiButton.disabled || !source || !curves || !pitchMidi || !curveVoiced || drag || aiFlow.running) return;
 	const key = KEY_OPTIONS.find(k => k.id === el.keyFilter.value);
-	const range = detectionBar.range && { ...detectionBar.range };
+	const range = detectionBar.range;
 	if (!key || !range || range.end <= range.start) return;
-	const before = curves.clone();
-	const level = Number(aiLevel.value);
-	const settings = { ...aiSettings.settings };
-	const controller = new AbortController(); aiAbort = controller;
-	aiWorking = busy = true;
-	aiButton.setAttribute('aria-busy', 'true');
-	player.pause(); syncPlayButton();
-	const header = document.querySelector('header')!;
-	header.inert = el.stage.inert = el.globalBar.inert = true;
-	aiCancel.hidden = false; aiCancel.disabled = false;
-	const task = progressView.begin('準備修正音符');
-	aiStatus.textContent = '整理檢測範圍內的穩定音符…';
-	syncAIControls();
-	try {
-		const notes = correctionNotes(before, pitchMidi, curveVoiced, key, range);
-		if (!notes.length) throw new Error('檢測範圍內沒有足夠穩定的音符；短音、滑音及低可信度段落會保留');
-		const decisions = await suggestCorrections(settings, notes, key, controller.signal, (done, total) => {
-			aiStatus.textContent = `AI 建議 ${done} / ${total} 批（${notes.length} 個音符）`;
-			task.update('AI 分析音符摘要', total ? done / total : 0);
-		});
-		if (controller.signal.aborted) throw new Error('AI 修正已取消，未套用變更');
-		const result = applyCorrection(before, notes, decisions, key, level, curveVoiced);
-		if (!result.count || sameCurves(before, result.curves)) {
-			aiStatus.textContent = '沒有需要修正的穩定音符；不確定的音符保留原樣';
-			task.finish('沒有套用修正'); return;
+	const sourceStart = curves.timeMap.outToSrc(range.start);
+	const sourceEnd = curves.timeMap.outToSrc(range.end);
+	const segments = planAudioSegments(source.channels, source.sampleRate, { start: sourceStart, end: sourceEnd })
+		.map(segment => ({ start: curves!.timeMap.srcToOut(segment.start), end: curves!.timeMap.srcToOut(segment.end) }));
+	const historyDepthBeforeAI=history.depth;
+	const outcome = await aiFlow.run({
+		curves, midi: pitchMidi, voiced: curveVoiced, key, range, segments,
+		level: Number(aiLevel.value), settings: aiSettings.settings,
+	}, update => {
+		aiStatus.textContent = update.message;
+		aiCancel.disabled = !update.cancellable;
+	});
+	switch (outcome.status) {
+		case 'completed': {
+			const { settings, key, level, range } = outcome.input;
+			// AICorrectionFlow has committed the corrected curves by this point. Keep the
+			// pre/post curve pair and the rendered AI audio so every returned region can
+			// be reviewed independently and later exported as training feedback.
+			aiRegions = createAIRegions(outcome.input.curves, curves!, outcome.regions);
+			const reviewAudio = new Map<number, { start: number; end: number; channels: import('./types').Samples[] }>();
+			const duration = renderer.rendered[0]?.length / renderer.sampleRate || 0;
+			for (const region of aiRegions) {
+				const regionStart = toOut(Curves.frameToTime(region.from));
+				const regionEnd = toOut(Curves.frameToTime(region.to));
+				if (regionEnd - regionStart > 5) continue;
+				const start = Math.max(0, regionStart - 3);
+				const end = Math.min(duration, regionEnd + 3);
+				const fromSample = Math.round(start * renderer.sampleRate);
+				const toSample = Math.round(end * renderer.sampleRate);
+				reviewAudio.set(region.id, {
+					start, end,
+					channels: renderer.rendered.map(channel => channel.slice(fromSample, toSample)),
+				});
+			}
+			aiReview = { curves: curves!.clone(), input: outcome.input, audio: reviewAudio, keyLabel: key.label, historyDepth: historyDepthBeforeAI };
+			clearSelection();setTool('select');
+			aiStatus.textContent = `${settings.provider === 'rules' ? '傳統內建修正' : settings.provider === 'builtin-ai' ? '內建 AI 修正' : '外部 AI 修正'}完成：${outcome.count} 個音符 · ${aiRegions.length} 個黃框 · ${outcome.segmentCount} 個低音壓分段 · ${key.label} · ${level}/10 · ${fmtTime(range.start)}～${fmtTime(range.end)}`;
+			break;
 		}
-		// 修正曲線尚未提交；模型失敗／取消不會增加復原紀錄。開始音訊算繪後不再接受取消。
-		aiCancel.disabled = true;
-		aiStatus.textContent = '正在套用修正音訊…';
-		task.update('算繪修正音訊');
-		await renderer.patch(result.curves, range.start, range.end);
-		history.push(before);
-		curves = result.curves;
-		selBase = selection ? curves.clone() : null;
-		sessionPushed = false; resetParams();
-		player.setAudio(renderer.rendered, renderer.sampleRate);
-		scheduleBackground({ from: range.start, to: range.end });
-		aiStatus.textContent = `${settings.provider === 'builtin' ? '內建調性修正' : 'AI 修正'}完成：${result.count} 個音符 · ${key.label} · ${level}/10 · ${fmtTime(range.start)}～${fmtTime(range.end)}`;
-		task.finish('音高修正完成，可播放試聽或回復上一步');
-	} catch (error) {
-		aiStatus.textContent = error instanceof Error ? error.message : '修正失敗';
-		task.finish(aiStatus.textContent, !controller.signal.aborted);
-	} finally {
-		aiAbort = null; aiWorking = busy = false;
-		aiButton.setAttribute('aria-busy', 'false');
-		header.inert = el.stage.inert = el.globalBar.inert = false;
-		aiCancel.hidden = true;
-		syncAIControls();
+		case 'unchanged':
+			aiStatus.textContent = '沒有需要修正的穩定音符；不確定的音符保留原樣';
+			break;
+		case 'cancelled':
+		case 'failed':
+			aiStatus.textContent = outcome.message;
+			break;
+		case 'busy': break;
 	}
+	syncAIControls();
+});
+
+workState.subscribe(state => {
+	progressView.render(state.progress);
+	computeControl.sync();
+	const ai = workState.has('ai');
+	aiButton.setAttribute('aria-busy', String(ai));
+	aiCancel.hidden = !ai;
+	if (!ai) aiCancel.disabled = true;
+	// Keep playback available during ordinary rendering; all editing follows one policy.
+	el.stage.inert = el.globalBar.inert = el.panel.inert = state.blocksEditing;
+	document.querySelector('header')!.inert = ai;
+	el.openAudio.disabled = !workState.canStart('load');
+	el.file.disabled = !workState.canStart('load');
+	el.openProject.disabled = !workState.canStart('project');
+	el.refFile.disabled = !workState.canStart('reference');
+	el.exportBtn.disabled = !source || !curves || !workState.canStart('export');
+	el.saveBtn.disabled = !source || !curves || state.blocksEditing;
+	syncAIControls();
 });
 
 function frame() {
@@ -2003,7 +1974,9 @@ function frame() {
 		const loop = player.loopRegion;
 		waveform.draw(pos, selection, curves, loop, renderingRange, selectedAnchors);
 		refWave.draw(pos, selection, loop);
-		pianoroll.draw(pos, selection, curves, loop, renderingRange, selectedAnchors);
+		const displayCurves=aiPreviewCurves??curves;
+		pianoroll.draw(pos, selection, displayCurves, loop, renderingRange, selectedAnchors);
+	   if(displayCurves&&pitchMidi)aiOverlay.draw(aiRegions,displayCurves,pitchMidi,t=>view.timeToX(t),pianoroll.rangeOf('pitch'),el.pianoroll.clientHeight,workState.isBusy);
 		detectionBar.sync();
 		hbar.sync();
 		vbar.sync();
@@ -2011,3 +1984,25 @@ function frame() {
 	requestAnimationFrame(frame);
 }
 frame();
+
+// Test hooks and URL fixtures are deliberately excluded from production builds.
+if (import.meta.env.DEV) {
+ void import('./dev/diagnostics').then(({ installDiagnostics }) => {
+  diagnostics = installDiagnostics({
+   get curves() { return curves; },
+   get source() { return source; },
+   get track() { return track; },
+   get selection() { return selection; },
+   get pitchMidi() { return pitchMidi; },
+   get curveVoiced() { return curveVoiced; },
+   get followPlayhead() { return followPlayhead; },
+   get selectedAnchors() { return selectedAnchors; },
+
+   get backgroundWaiting() { return !!bgTimer || !!bgPendingRange; },
+   view, player, renderer, history, pianoroll, waveform, refWave, ref, el,
+   toSrc, toOut, outDuration, waitBackground, rerender, remapSelection, applyTimeMap, load, status,
+  }, window, location.search);
+  import.meta.hot?.dispose(() => diagnostics?.dispose());
+  return diagnostics.autoload();
+ });
+}

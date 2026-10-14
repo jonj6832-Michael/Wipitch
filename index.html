@@ -10,9 +10,8 @@
 <body>
 	<header>
 		<h1><a href="https://nicechord.com" target="_blank" rel="noopener">WiPitch <span class="by">by NiceChord</span></a></h1>
-		<label class="file">
-			開啟音檔<input type="file" id="file" accept="audio/*">
-		</label>
+		<button id="open-audio" type="button">開啟音檔</button>
+		<input type="file" id="file" accept="audio/*" hidden aria-hidden="true">
 		<div class="transport">
 			<button id="play" class="icon" title="播放（空白鍵）" disabled>▶</button>
 			<button id="stop" class="icon" title="停止並回到開頭" disabled>■</button>
@@ -23,6 +22,7 @@
 		<button id="export" disabled>匯出 WAV</button>
 		<button id="save" disabled>存檔</button>
 		<label class="file">讀檔<input type="file" id="open-project" accept=".json"></label>
+		<button id="training-library-open" type="button">訓練資料庫管理</button>
 		<div class="modes" title="移調時音色要不要跟著跑">
 			<button id="mode-voice" class="on" title="人聲：移調時保留音色，拉高 7 個半音仍是同一個人">人聲</button>
 			<button id="mode-instrument" title="樂器：音色完全跟著移調（等同關掉音色保留）">樂器</button>
@@ -37,12 +37,13 @@
 	</header>
 	<div id="ai-toolbar" aria-label="AI 音高修正">
 		<button id="ai-settings-open" type="button">AI 設定</button>
-		<span id="ai-service">內建調性修正（不連線）</span>
+			<span id="ai-service">傳統內建模式（固定規則）</span>
 		<label for="ai-strength">修正程度</label>
-		<input id="ai-strength" type="range" min="1" max="10" step="1" value="5" title="1 級修正 10%，10 級完整修正音符中心；保留顫音。調整後按 AI 修正套用。">
-		<output id="ai-strength-value" for="ai-strength">5 / 10</output>
+			<input id="ai-strength" type="range" min="1" max="10" step="1" value="5" title="傳統模式：等級越高，越小的走音也會被選中；入選後完整修正音高中心。">
+			<output id="ai-strength-value" for="ai-strength">5 / 10 · ≥30¢</output>
 		<button id="ai-correct" type="button" disabled>AI 修正</button>
-		<button id="ai-undo" type="button" disabled>回復上一步</button>
+		<button id="ai-undo" type="button" disabled>取消AI修改</button>
+        <button id="ai-clear-marks" type="button" disabled>取消AI修正標示</button>
 		<button id="ai-cancel" type="button" hidden>取消修正</button>
 		<span id="ai-status" role="status">選擇 Key 並在檢測列標示範圍</span>
 	</div>
@@ -50,7 +51,7 @@
 		<form>
 			<h2 id="ai-settings-title">AI 修正設定</h2>
 			<label for="ai-provider">修正服務</label>
-			<select id="ai-provider"><option value="builtin">內建調性修正（不連線）</option><option value="ollama">本機 Ollama</option><option value="openai">OpenAI 相容 API</option></select>
+				<select id="ai-provider"><option value="rules">傳統內建模式（固定規則）</option><option value="builtin-ai" disabled>內建 AI 模式（正在檢查資料）</option><option value="ollama">外部 AI：本機 Ollama</option><option value="openai">外部 AI：OpenAI 相容 API</option></select>
 			<label for="ai-url">API 基底網址</label><input id="ai-url" type="url" placeholder="http://localhost:11434" autocomplete="off">
 			<label for="ai-model">模型名稱</label><input id="ai-model" list="ai-models" placeholder="填入已安裝或服務提供的模型名稱" autocomplete="off"><datalist id="ai-models"></datalist>
 			<label for="ai-api-key">API Key（本機 Ollama 通常不需要）</label><input id="ai-api-key" type="password" autocomplete="off" spellcheck="false">

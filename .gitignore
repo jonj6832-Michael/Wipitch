@@ -15,3 +15,8 @@ spike/out/
 # npm run verify 和網址參數 ?autoload=/Vocal.wav 會用到它，
 # 但不放進版本控制——要用的話自己放一個同名檔案到專案根目錄。
 /Vocal.wav
+
+# Local personal training audio and images
+/AI訓練/
+
+/AI訓練暫存/

@@ -1,0 +1,13 @@
+<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><title>AI 黃框互動測試</title><link rel="stylesheet" href="/src/ui/style.css"><style>body{display:block;padding:30px}#fixture{position:relative;height:360px;width:800px;background:repeating-linear-gradient(#181d25 0 29px,#323940 29px 30px);--piano-key-width:0px}p{margin:20px}</style><h1>AI 黃框互動測試（合成資料，無音訊／磁碟寫入）</h1><p>取消勾選應恢復原曲線，重新勾選恢復修正；在黃框內上下拖曳後勾選框變紅。</p><div id="fixture"></div><p id="result"></p><script type="module">
+import {AIRegionOverlay} from '/src/ui/ai-regions.ts';
+import {Curves} from '/src/model/curves.ts';
+import {createAIRegions,regionCurves,syncAIRegion} from '/src/model/ai-regions.ts';
+const base=new Curves(1000),midi=new Float32Array(1000).fill(60);
+let current=base.clone();current.pitch.fill(.5,100,300);
+const regions=createAIRegions(base,current,[{id:1,from:100,to:300,kind:'onset'}]);
+const overlay=new AIRegionOverlay(document.querySelector('#fixture'),async(r,enabled,offset)=>{
+ current=regionCurves(current,r,enabled,offset);syncAIRegion(r,current);draw();
+});
+function draw(){overlay.draw(regions,current,midi,t=>t*500,{lo:56,hi:64},360,false);document.querySelector('#result').textContent=`啟用：${regions[0].enabled}；人工調整：${regions[0].edited}；中央偏移：${current.pitch[200].toFixed(2)} 半音`;}
+draw();
+</script></html>

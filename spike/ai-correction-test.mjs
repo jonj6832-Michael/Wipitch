@@ -26,6 +26,13 @@ for (let level = 1; level <= 10; level++) {
 	assert.deepEqual(curves.gainDb, base.gainDb); assert.deepEqual(curves.formant, base.formant);
 }
 assert.ok(base.pitch.every(x => x === 0));
+
+// 傳統模式：等級只控制入選門檻，入選後完整修正到目標中心。
+const sensitivityNotes = [{ ...notes[0], id: 0, center: 60.32, targets: [60], defaultTarget: 60 }];
+assert.equal(applyCorrection(base, sensitivityNotes, [{ id: 0, targetMidi: 60 }], key, 4, voiced, 'sensitivity').count, 0); // 35c 門檻
+const sensitive = applyCorrection(base, sensitivityNotes, [{ id: 0, targetMidi: 60 }], key, 5, voiced, 'sensitivity'); // 30c 門檻
+assert.equal(sensitive.count, 1);
+assert.ok(Math.abs(sensitive.curves.pitch[500] + .32) < 1e-6);
 const history = new History(); history.push(base);
 const corrected = applyCorrection(base, notes, decisions, key, 10, voiced).curves;
 assert.deepEqual(history.undo(corrected).pitch, base.pitch);
@@ -67,7 +74,7 @@ for (const provider of ['ollama', 'openai']) {
 	await assert.rejects(suggestCorrections(settings, notes, key, cancel.signal, () => {}, mockFetch), /取消/);
 	assert.equal(calls, 1);
 }
-const builtin = { provider: 'builtin', baseUrl: '', model: '', apiKey: '' };
+const builtin = { provider: 'rules', baseUrl: '', model: '', apiKey: '' };
 assert.deepEqual(await suggestCorrections(builtin, notes, key, signal, () => {}, () => assert.fail()), decisions);
 assert.throws(() => endpoint({ ...builtin, provider: 'openai', baseUrl: 'https://user:secret@example.test/v1' }));
 assert.throws(() => endpoint({ ...builtin, provider: 'openai', baseUrl: 'http://example.test/v1' }));

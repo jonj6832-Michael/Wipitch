@@ -327,9 +327,12 @@ export class Renderer {
 				}
 			}
 		} catch {
-			return false;   // 被取消（worker 被終止）
+			// 真正的 Worker 失敗也必須結束工作；舊任務不得清掉新任務的狀態。
+			if (alive()) this.cancelBackground();
+			return false;
 		}
-		if (!alive() || this.rendered[0].length !== total) return false;
+		if (!alive()) return false;
+		if (this.rendered[0].length !== total) { this.cancelBackground(); return false; }
 
 		// 換上。每一段的兩端都落在無聲處（重建模式則是原始音訊），新舊內容差一點也聽不到
 		for (const s of staged) pasteWithFades(this.rendered, s.data, s.at, s.at > 0, s.at + s.data[0].length < total, sr);

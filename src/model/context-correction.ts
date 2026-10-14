@@ -1,0 +1,65 @@
+import { CURVE_HOP_SEC, CURVE_SUB } from './curves';
+import type { TimeMap } from './timemap';
+import { correctionNotes, type CorrectionNote } from './auto-pitch';
+import { isInKey, type KeySignature } from './keys';
+const median = (a: number[]) => [...a].sort((x,y) => x-y)[Math.floor(a.length/2)];
+/** Conservative context rules, not a trained predictor. All edits stay inside range. */
+type CorrectionCurveView = { length: number; pitch: Float32Array; timeMap: TimeMap };
+export function contextCorrectionNotes(curves: CorrectionCurveView, midi: Float32Array, voiced: Uint8Array, key: KeySignature, range: { start:number; end:number }): CorrectionNote[] {
+ const first = Math.max(0, Math.ceil(curves.timeMap.outToSrc(range.start)/CURVE_HOP_SEC));
+ const last = Math.min(curves.length, midi.length, voiced.length, Math.ceil(curves.timeMap.outToSrc(range.end)/CURVE_HOP_SEC));
+ const pts: { frame:number; value:number; smooth:number; target:number|null }[] = [];
+ const contextFirst = Math.max(0, first - 1500), contextLast = Math.min(curves.length, midi.length, voiced.length, last + 1500);
+ for (let frame=contextFirst; frame<contextLast; frame+=CURVE_SUB) {
+  const value = voiced[frame] ? midi[frame]+curves.pitch[frame] : NaN;
+  pts.push({frame,value,smooth:value,target:null});
+ }
+ for(let i=0;i<pts.length;i++) {
+  const window=pts.slice(Math.max(0,i-2),i+3).map(p=>p.value).filter(Number.isFinite);
+  pts[i].smooth=Number.isFinite(pts[i].value)&&window.length ? median(window):NaN;
+  const values=pts.slice(i,i+10).map(p=>p.value);
+  if(values.length===10 && values.every(Number.isFinite)) {
+   const center=median(values), target=Math.round(center);
+   if(isInKey(target,key)&&Math.abs(center-target)<=.2&&Math.max(...values)-Math.min(...values)<=.3) pts[i].target=target;
+  }
+ }
+ const result: CorrectionNote[]=[];
+ function emit(a:number,b:number,target:number,kind:'onset'|'drift') {
+  const from=Math.max(first,pts[a].frame),to=Math.min(last,pts[b-1].frame+CURVE_SUB);
+  if(to<=from || (to-from)*CURVE_HOP_SEC<.024)return;
+  if(result.some(n=>n.from<to&&n.to>from))return;
+  const values=pts.slice(a,b).filter(p=>p.frame>=from&&p.frame<to).map(p=>p.smooth);
+  const center=median(values);
+  if(!Number.isFinite(center)||Math.abs(center-target)<.08||Math.abs(center-target)>1.2)return;
+  result.push({id:0,from,to,center,spread:Math.max(...values)-Math.min(...values),targets:[target],defaultTarget:target,kind});
+ }
+ // An onset must begin at a voiced boundary and converge toward a following stable target.
+ for(let a=0;a<pts.length;a++) {
+  if(!Number.isFinite(pts[a].value)||(a>0&&Number.isFinite(pts[a-1].value)))continue;
+  for(let b=a+2;b<Math.min(pts.length,a+20);b++) {
+   const target=pts[b].target;if(target===null)continue;
+   const segment=pts.slice(a,b);
+   if(!segment.every(p=>Number.isFinite(p.value)))break;
+   const distances=segment.map(p=>p.smooth-target);
+   if(Math.abs(distances[0])<.18||Math.abs(distances.at(-1)!)>Math.abs(distances[0])+.05)break;
+   if(distances.some(v=>v*distances[0]<-.02))break;
+   emit(a,b,target,'onset');break;
+  }
+ }
+ // Sustained drift needs the same stable note on both sides; repeated alternating excursions are vibrato.
+ for(let a=1;a<pts.length-10;a++) {
+  const target=pts[a-10]?.target ?? null;
+  if(target===null||!Number.isFinite(pts[a].smooth)||Math.abs(pts[a].smooth-target)<.18||Math.abs(pts[a-1].smooth-target)>=.18)continue;
+  let b=a;
+  while(b<pts.length && b-a<32 && Number.isFinite(pts[b].smooth)&&Math.abs(pts[b].smooth-target)>.1)b++;
+  if(b-a<3||b>=pts.length||pts[b].target!==target)continue;
+  const surrounding=pts.slice(Math.max(0,a-30),Math.min(pts.length,b+30));
+  let crossings=0,sign=0;
+  for(const p of surrounding) { const v=p.smooth-target;if(!Number.isFinite(v)||Math.abs(v)<.08)continue;const next=Math.sign(v);if(sign&&next!==sign)crossings++;sign=next; }
+  if(crossings>2)continue;
+  emit(a,b,target,'drift');a=b;
+ }
+ // Retain steady, uniformly off-center note correction; context candidates take precedence.
+ const fallback=correctionNotes(curves,midi,voiced,key,range).filter(n=>!result.some(r=>r.from<n.to&&r.to>n.from));
+ return [...result,...fallback.map(n=>({...n,kind:'center' as const}))].sort((a,b)=>a.from-b.from).map((n,id)=>({...n,id}));
+}

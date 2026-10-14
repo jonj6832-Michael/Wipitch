@@ -1,22 +1,24 @@
 import assert from 'node:assert/strict';
-import { LoadGuard, LoadTimings, analyseSource } from '../src/loading.ts';
+import { LoadTimings, analyseSource } from '../src/loading.ts';
+import { WorkState } from '../src/application/work-state.ts';
+import { Curves } from '../src/model/curves.ts';
 import { withWasmFallback } from '../src/analysis/compute-mode.ts';
 import { registerHooks } from 'node:module';
 
 // 選檔、拖放及自動載入共用的互斥入口；失敗及成功都必須恢復操作。
-const guard = new LoadGuard();
-const states = [];
-let finish;
-const first = guard.run(() => new Promise(resolve => finish = resolve), busy => states.push(busy));
-assert.equal(guard.busy, true);
-assert.equal(await guard.run(async () => assert.fail('duplicate load started'), () => assert.fail()), false);
-finish();
-assert.equal(await first, true);
-assert.deepEqual(states, [true, false]);
-await assert.rejects(guard.run(async () => { throw new Error('decode failed'); }, busy => states.push(busy)), /decode failed/);
-assert.equal(guard.busy, false);
-assert.equal(await guard.run(async () => {}, busy => states.push(busy)), true);
-assert.deepEqual(states, [true, false, true, false, true, false]);
+const work = new WorkState();
+const first = work.tryBegin('load', 'read');
+assert.equal(work.has('load'), true);
+assert.equal(work.tryBegin('load', 'duplicate'), null);
+first.finish('loaded');
+assert.equal(work.isBusy, false);
+const failed = work.tryBegin('load', 'read');
+failed.finish('decode failed', true);
+assert.equal(work.isBusy, false);
+assert.equal(work.snapshot.progress.error, true);
+const retried = work.tryBegin('load', 'retry');
+assert.ok(retried);
+retried.finish('loaded');
 
 // 回退時原始分析資料仍在；最終成功才清除，且不能修改播放聲道或音高結果。
 const audio = new Float32Array([0.1, -0.1, 0.2]);
@@ -75,4 +77,22 @@ try {
 	workerFailure = null;
 	await new Renderer().init(channels, 48000);
 	console.log('PASS: render Worker initialization/message/transfer errors reject, successful initialization remains available');
+	const renderer = new Renderer();
+	await renderer.init([new Float32Array(48000).fill(.2)], 48000);
+	const curves = new Curves(500);
+	const anchor = curves.timeMap.add(.5);
+	curves.timeMap.move(anchor.id, .75);
+	renderer.setTimeMap(curves.timeMap);
+	const state = new WorkState();
+	let background;
+	renderer.onBackground = () => {
+		if (renderer.backgroundProgress !== null) background ??= state.begin('background', '精算');
+		else { background?.finish('已結束'); background = null; }
+	};
+	workerFailure = 'error';
+	assert.equal(await renderer.renderBackground(curves, { from: 0, to: 1 }), false);
+	assert.equal(renderer.backgroundProgress, null);
+	assert.equal(state.isBusy, false);
+	assert.ok(state.tryBegin('load', '失敗後可重新載入'));
+	console.log('PASS: background Worker failure releases application work state');
 } finally { hook.deregister(); delete globalThis.LoadTestWorker; }
