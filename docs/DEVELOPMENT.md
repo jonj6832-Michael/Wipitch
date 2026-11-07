@@ -48,6 +48,16 @@
 
 測試項目、素材需求、診斷入口與建議執行順序見 [TESTING.md](TESTING.md)。
 
+## SwiftF0 平行音高分析
+
+大型音檔的 16kHz 單聲道分析資料會依可用 Worker 數平均切段：CPU/WASM 的主要分段數等於瀏覽器 `navigator.hardwareConcurrency` 回報的 CPU 工作槽數；WebGPU 固定最多 2 段，避免多個工作爭用同一 GPU。短檔案會以每段至少 20 秒縮減分段數，避免模型初始化成本高於平行收益。
+
+每個理想平均切點左右最多 15 秒，以滑動 RMS 找出「連續一秒平均音壓最低」的區域，切點取該秒正中央，再對齊 SwiftF0 的 256-sample（16ms）hop。每段前後另讀 4096 samples（256ms／16 格）上下文；合併時只採用核心範圍，因此接縫不重複也不漏格。每個 Worker 只載入一次 ONNX 模型並處理一個主要分段；GPU 失敗時會終止整組 GPU 工作，使用原始 16kHz 資料重新啟動 WASM Worker 組，不混用兩種後端的局部結果。
+
+本機 Chromium/WASM 的 360 秒合成音訊基準中，1 Worker／1 段為 16.59 秒、2 Worker／2 段為 10.79 秒、4 Worker／4 段為 9.38 秒；4 Worker／8 段在不同輪次量到 8.07～8.46 秒。合成靜音資料容易受快取、JIT 與 20 秒內部分塊排程影響，所以只能證明增加 Worker 有明顯收益，不能單靠它判定 4 段或 8 段絕對較快。保留 `spike/pitch-parallel-benchmark.mjs` 供其他設備重跑。
+
+實際 217MB、26:18、48kHz／24-bit 單聲道 WAV 的比較：舊策略為 31 段／4 Worker，音高分析 52.30 秒；依瀏覽器回報的 10 個 CPU 工作槽改為 10 段／10 Worker 後為 34.90 秒，縮短約 33.3%。合成資料的短測試仍有快取、JIT 與分段負載差異，因此產品決策以這份大型實檔為主要依據。
+
 ## 驗收
 
 ```
@@ -105,7 +115,18 @@ npm run release   # → release/wipitch-<git 版本>.tar.gz
 `tools/release/` 裡的伺服器、安裝腳本包成 tar.gz。包裡只有靜態檔和零依賴的
 `serve.mjs`，所以跨 Linux / macOS 通用。安裝包本身不進版本控制。
 
+## 顯示模組與應用層邊界
+
+主要控制面板已拆成獨立顯示模組：`EditInspectorView` 管理選取資訊與音高、音量、共振峰參數，
+`ToolLaneControlsView` 管理工具與軌道顯示，`TransportView` 管理播放控制，
+`ReferenceTrackControlsView` 管理參考音軌控制。這些模組只接收畫面狀態並送出使用者操作事件。
+
+`main.ts` 的應用層仍統一持有 `Curves`、`History`、`Renderer`、`Player` 與 `WorkState`，
+負責驗證操作、更新資料、建立復原紀錄及安排算繪。顯示模組不直接修改音訊或編輯資料。
+
 ## 依賴
+
+開發伺服器會在啟動時預先最佳化 `rubberband-wasm` 與 `onnxruntime-web/webgpu`。兩者原本只在第一次開啟音檔時由 Worker 動態載入，Vite 會因此輸出 `optimized dependencies changed. reloading` 並重載整頁，使使用者誤以為程式重新啟動。`vite.config.ts` 的 `optimizeDeps.include` 必須保留；冷啟動測試應先以 `npm run dev -- --force` 重建快取，再載入音檔並確認沒有第二次 reload。
 
 | 套件 | 版本 | 用途 | 會進安裝包？ |
 |---|---|---|---|

@@ -7,6 +7,8 @@ import type { Curves } from '../model/curves';
 import type { Source } from '../audio/decode';
 import type { ViewState } from './viewstate';
 import type { Samples } from '../types';
+import { referenceBeatGrid } from '../model/reference-beat-grid';
+import type { ReferenceBeatRecord } from '../model/reference-beat-table';
 
 const PEAK_SAMPLES = 256;
 
@@ -158,7 +160,7 @@ export class RefWaveformView {
 		this.peaks = buildPeaks(mono);
 	}
 
-	draw(playhead: number, selection: { start: number; end: number } | null, loop: { start: number; end: number } | null) {
+	draw(playhead: number, selection: { start: number; end: number } | null, loop: { start: number; end: number } | null, beatAnchor: number | null = null, barStarts: readonly number[] = [], bpm = 120, meter = '4/4', analyzedBeats = false, beatRecords: readonly ReferenceBeatRecord[] = []) {
 		const { canvas, ctx, view } = this;
 		const dpr = window.devicePixelRatio || 1;
 		const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -195,6 +197,28 @@ export class RefWaveformView {
 				if (!r) continue;
 				const yTop = mid - clampAmp(r.max * z) * mid, yBot = mid - clampAmp(r.min * z) * mid;
 				ctx.fillRect(x, yTop, 1, Math.max(1, yBot - yTop));
+			}
+		}
+		const drawBeat = (time: number, first: boolean, analyzed: boolean) => {
+			const x = view.timeToX(time);
+			if (x < -5 || x > w + 5) return;
+			ctx.fillStyle = analyzed && first ? '#ff6b6b' : '#ffd54a';
+			const size = first ? 6 : 4;
+			ctx.beginPath(); ctx.moveTo(x, h - 2 - size * 2); ctx.lineTo(x - size, h - 2); ctx.lineTo(x + size, h - 2); ctx.closePath(); ctx.fill();
+		};
+		if (!analyzedBeats) for (const marker of referenceBeatGrid(barStarts, bpm, meter)) {
+			if (marker.barIndex === barStarts.length - 1 && !marker.downbeat) continue;
+			drawBeat(marker.time, marker.downbeat, false);
+		}
+		for (const row of beatRecords) {
+			drawBeat(row.timeSec, row.beatInBar === 1, true);
+		}
+		if (beatAnchor !== null) {
+			const ax = view.timeToX(beatAnchor);
+			if (ax >= -10 && ax <= w + 10) {
+				ctx.strokeStyle = '#ffd54a'; ctx.lineWidth = 2;
+				ctx.beginPath(); ctx.moveTo(ax + 0.5, 0); ctx.lineTo(ax + 0.5, h); ctx.stroke();
+				ctx.fillStyle = '#ffd54a'; ctx.font = '14px system-ui'; ctx.textAlign = 'center'; ctx.fillText('⚓', ax, Math.max(16, h - 5));
 			}
 		}
 

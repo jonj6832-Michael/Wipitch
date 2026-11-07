@@ -23,7 +23,7 @@
 ## 建議執行順序
 
 1. `npm run check`：型別與模組介面檢查。
-2. `npm run verify:core`：依序執行下列 12 組測試，第一個失敗即停止。不需要真實音檔或外部 AI 服務。使用支援 `--experimental-transform-types` 的 Node；本次以 Node 22.23.2 驗證。
+2. `npm run verify:core`：依序執行目前 19 組測試，第一個失敗即停止。不需要真實音檔或外部 AI 服務。使用支援 `--experimental-transform-types` 的 Node；本次以 Node 22.23.2 驗證。
 3. `npm run build`：正式建置。檢查產物沒有 `__debug`、`__pitchCompare`、`__stretchForTest` 等開發入口。
 4. `npm run dev`：於 `http://127.0.0.1:5180/` 做下列人工操作驗收。
 5. 涉及音訊引擎變動時，再執行指定聲音回歸與聆聽；核心測試通過不能取代音質驗證。
@@ -42,12 +42,20 @@
 | note-preview-test.mjs | 琴鍵試聽生命週期、載入與釋放（替代音訊依賴） |
 | zoom-gesture-test.mjs | 滾輪／觸控縮放及定位 |
 | detection-bar-test.mjs | 檢測範圍操作、與編輯選取分離、偏離顯示 |
-| pitch-deviation-test.mjs | 最近調內音與 ±50 cents 判斷 |
+| pitch-deviation-test.mjs | 最近調內音與 ±25 cents 判斷 |
 | timemap-test.mjs | 時間對應、反向對應、邊界與錨點操作 |
 | slope-limit-test.mjs | 音高變化率上限及範圍外不變 |
 | diagnostics-test.mjs | 12 個入口、即時資料 getter、網址視野、快照比較與清理 |
+| audio-segments-test.mjs | 舊分段相容性、AI／音高共用的 CPU 等量分段、一秒最低 RMS 中點與短檔縮減 |
+| pitch-segments-test.mjs | 一秒最低平均音壓的中點、hop 對齊、上下文與無漏格合併 |
 
 這些包含純數值測試與替代 DOM／Worker／服務的流程測試，不代表實際 GPU、音訊硬體或遠端模型已被驗證。
+
+`spike/pitch-parallel-browser-test.mjs` 會以真正的瀏覽器 WASM 後端啟動 4 個持久 SwiftF0 Worker，確認多段合併長度；需先啟動開發伺服器。`spike/pitch-parallel-benchmark.mjs` 量測 360 秒合成音訊在 1、2、4 Worker 各一段，以及 4 Worker 共處理 8 段的完成時間，驗證不同硬體上的最佳分段數，不列入日常核心測試。
+
+`spike/ai-segment-browser-test.mjs` 會以真正瀏覽器取得 CPU 工作槽數，透過與音高分析相同的分段器建立範圍，再驗證相同數量的 AI 候選 Worker 完成並合併結果。
+
+`spike/ui-display-modules-browser-test.mjs` 會在隔離的 DOM fixture 中驗證頂部工作列、AI 工具列、Key／畫筆選項、檢測工具、底部全域控制、載入報告、選取參數 Inspector、工具／lane、播放列與參考音軌等顯示模組；測試確認它們只發出使用者意圖或呈現傳入狀態，無須建立 Curves、Player、Renderer 或工作狀態。
 
 ## 現有聲音與介面回歸
 

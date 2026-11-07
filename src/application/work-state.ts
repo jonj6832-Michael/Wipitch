@@ -1,4 +1,4 @@
-export type WorkKind = 'load' | 'project' | 'reference' | 'render' | 'background' | 'ai' | 'export';
+export type WorkKind = 'load' | 'project' | 'reference' | 'main-pitch' | 'reference-pitch' | 'rhythm' | 'render' | 'background' | 'ai' | 'export';
 export interface WorkProgress {
 	readonly label: string;
 	readonly fraction: number | null;
@@ -58,10 +58,12 @@ export class WorkState {
 	get snapshot(): WorkSnapshot {
 		const active = [...this.tasks.values()].reverse();
 		const task = active.find(t => t.kind !== 'background') ?? active[0];
+		const analyses = active.filter(t => t.kind === 'main-pitch' || t.kind === 'reference-pitch' || t.kind === 'rhythm');
 		return Object.freeze({
 			kinds: Object.freeze(active.map(t => t.kind)), isBusy: this.isBusy, blocksEditing: this.blocksEditing,
 			progress: Object.freeze(task
-				? { label: task.label, fraction: task.fraction, error: false, active: true }
+				? { label: analyses.length ? analyses.map(t => t.label).join(' ｜ ') : task.label,
+					fraction: analyses.length ? analyses.reduce((sum, t) => sum + (t.fraction ?? 0), 0) / analyses.length : task.fraction, error: false, active: true }
 				: { ...this.result, active: false }),
 		});
 	}

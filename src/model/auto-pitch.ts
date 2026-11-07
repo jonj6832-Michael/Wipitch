@@ -86,7 +86,8 @@ export function validateDecisions(value: unknown, notes: CorrectionNote[], key: 
 
 /** 只新增音符中心偏移，不壓平顫音；淡入淡出完全位於檢測範圍內。 */
 export function applyCorrection(base: Curves, notes: CorrectionNote[], decisions: CorrectionDecision[],
-	key: KeySignature, level: number, voiced: Uint8Array, strategy: CorrectionStrategy = 'strength'): { curves: Curves; count: number } {
+	key: KeySignature, level: number, voiced: Uint8Array, strategy: CorrectionStrategy = 'strength',
+	formantFollow = 0): { curves: Curves; count: number } {
 	if (!Number.isInteger(level) || level < 1 || level > 10) throw new Error('修正程度必須為 1～10 級');
 	const checked = validateDecisions({ decisions }, notes, key);
 	const byId = new Map(notes.map(note => [note.id, note]));
@@ -96,9 +97,7 @@ export function applyCorrection(base: Curves, notes: CorrectionNote[], decisions
 		const note = byId.get(decision.id)!;
 		if (decision.targetMidi === null) continue;
 		const error = decision.targetMidi - note.center;
-		// 傳統模式的等級代表挑選敏感度：1 級只處理至少 50 cents，
-		// 每升一級降低 5 cents，10 級處理至少 5 cents。入選後完整修正中心。
-		if (strategy === 'sensitivity' && Math.abs(error) + 1e-9 < (11 - level) * .05) continue;
+		// 傳統模式的時間資格已於候選選取階段判斷；入選後完整修正中心。
 		const delta = strategy === 'sensitivity' ? error : error * level / 10;
 		if (Math.abs(delta) < .005) continue;
 		count++;
@@ -110,6 +109,9 @@ export function applyCorrection(base: Curves, notes: CorrectionNote[], decisions
 			const weight = .5 - .5 * Math.cos(Math.PI * Math.min(1, edge / fade));
 			const amount = Math.sign(delta) * Math.min(Math.abs(delta) * weight, edge * maxStep);
 			out.pitch[i] = base.pitch[i] + amount;
+			// 引擎最後的音色位移 = formant 曲線 + formantFollow × pitch。
+			// 用反向補償抵銷這次 AI 移調，讓修正後的共振峰維持在原始位置。
+			out.formant[i] = base.formant[i] - formantFollow * amount;
 		}
 	}
 	return { curves: out, count };

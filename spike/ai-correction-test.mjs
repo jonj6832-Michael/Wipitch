@@ -1,3 +1,4 @@
+import { selectRuleNotes, ruleMinimumDurationMs } from '../src/model/rule-selection.ts';
 import assert from 'node:assert/strict';
 import { Curves, CURVE_HOP_SEC } from '../src/model/curves.ts';
 import { History } from '../src/model/history.ts';
@@ -27,12 +28,36 @@ for (let level = 1; level <= 10; level++) {
 }
 assert.ok(base.pitch.every(x => x === 0));
 
-// 傳統模式：等級只控制入選門檻，入選後完整修正到目標中心。
-const sensitivityNotes = [{ ...notes[0], id: 0, center: 60.32, targets: [60], defaultTarget: 60 }];
-assert.equal(applyCorrection(base, sensitivityNotes, [{ id: 0, targetMidi: 60 }], key, 4, voiced, 'sensitivity').count, 0); // 35c 門檻
-const sensitive = applyCorrection(base, sensitivityNotes, [{ id: 0, targetMidi: 60 }], key, 5, voiced, 'sensitivity'); // 30c 門檻
-assert.equal(sensitive.count, 1);
-assert.ok(Math.abs(sensitive.curves.pitch[500] + .32) < 1e-6);
+// 時間選段：同偏差短段可在高程度入選；不同偏差不改變時間資格。
+const ruleBase = new Curves(1000), ruleMidi = new Float32Array(1000).fill(60.2);
+const ruleVoiced = new Uint8Array(1000).fill(1);
+const candidate = { id: 0, from: 0, to: 120, center: 60.2, spread: 0, targets: [60], defaultTarget: 60 };
+for (let level = 1; level <= 10; level++) {
+ const selected = selectRuleNotes(ruleBase, [candidate], ruleMidi, ruleVoiced, level);
+ assert.equal(selected.length, 240 >= ruleMinimumDurationMs(level) ? 1 : 0);
+}
+ruleMidi.fill(60.06);
+assert.equal(selectRuleNotes(ruleBase, [candidate], ruleMidi, ruleVoiced, 6).length, 1);
+ruleMidi.fill(60.04);
+assert.equal(selectRuleNotes(ruleBase, [candidate], ruleMidi, ruleVoiced, 10).length, 0);
+ruleMidi.fill(60.2);
+ruleMidi.fill(60, 50, 70); // 回準將240ms切成兩段100ms，不能累加通過144ms。
+assert.equal(selectRuleNotes(ruleBase, [candidate], ruleMidi, ruleVoiced, 8).length, 0);
+let selected = selectRuleNotes(ruleBase, [candidate], ruleMidi, ruleVoiced, 9);
+assert.deepEqual(selected.map(n => [n.from, n.to]), [[0, 50], [70, 120]]);
+const sensitivity = applyCorrection(ruleBase, selected, selected.map(n => ({id:n.id,targetMidi:60})), key, 9, ruleVoiced, 'sensitivity');
+assert.equal(sensitivity.count, 2);
+assert.ok(Math.abs(sensitivity.curves.pitch[25] + .2) < 1e-5);
+assert.equal(sensitivity.curves.pitch[60], 0);
+ruleVoiced.fill(0, 50, 70); ruleMidi.fill(60.2);
+assert.equal(selectRuleNotes(ruleBase, [candidate], ruleMidi, ruleVoiced, 8).length, 0);
+ruleVoiced.fill(1); ruleMidi.fill(59.8, 60, 120);
+assert.equal(selectRuleNotes(ruleBase, [candidate], ruleMidi, ruleVoiced, 8).length, 0); // 反向中斷。
+ruleMidi.fill(60.2);
+const stretch = ruleBase.timeMap.add(.24); ruleBase.timeMap.move(stretch.id, .48);
+assert.equal(selectRuleNotes(ruleBase, [candidate], ruleMidi, ruleVoiced, 1).length, 1);
+ruleBase.timeMap.remove(stretch.id);
+assert.equal(selectRuleNotes(ruleBase, [{...candidate,defaultTarget:null}], ruleMidi, ruleVoiced, 10).length, 0);
 const history = new History(); history.push(base);
 const corrected = applyCorrection(base, notes, decisions, key, 10, voiced).curves;
 assert.deepEqual(history.undo(corrected).pitch, base.pitch);

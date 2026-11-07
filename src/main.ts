@@ -1,9 +1,12 @@
+import { ruleMinimumDurationMs } from './model/rule-selection';
+import { installPitchBenchmark } from './application/pitch-benchmark';
+import { DisplayCoordinator } from './application/display-coordinator';
 import { createAIRegions, regionCurves, resetAIRegionToAI, reviewedAIRegions, syncAIRegion, type AIRegion } from './model/ai-regions';
 import { AIRegionOverlay } from './ui/ai-regions';
 import { installTrainingLibrary } from './ui/training-library';
 import { prepareTrainingPair, stageTrainingPair, storeRejectedTrainingPair, resetTrainingStaging, commitTrainingStaging } from './training/recorder';
 import type { Diagnostics } from './dev/diagnostics';
-import { decodeFile, decodeAudio, fmtTime, type Source } from './audio/decode';
+import { decodeFile, decodeAudio, sourceRangeMono16k, fmtTime, type Source } from './audio/decode';
 import { ViewState } from './view/viewstate';
 import { WaveformView, RefWaveformView, drawOverview } from './view/waveform';
 import { RangeBar } from './view/rangebar';
@@ -11,7 +14,13 @@ import { PianoRollView } from './view/pianoroll';
 import { KEY_MODES, KEY_OPTIONS } from './model/keys';
 import { Player } from './engine/player';
 import { Renderer } from './engine/renderer';
-import { detectPitch } from './analysis/pitch';
+import { detectPitchParallel } from './analysis/pitch-parallel';
+import { createReferenceCache, findOnset, type ReferenceCache, type ReferenceRhythm } from './analysis/reference-cache';
+import { referenceBeatPreview } from './model/reference-beat-preview';
+import { mergeReferenceBeats, restoreReferenceBeats, shiftReferenceBeats, type ReferenceBeatRecord } from './model/reference-beat-table';
+import { averageBarBpm } from './analysis/bar-tempo';
+import { detectReferenceRhythm } from './analysis/reference-rhythm';
+import { concurrentAnalysis } from './application/concurrent-analysis';
 import { hzToMidi, midiToName, type PitchTrack } from './analysis/swiftf0';
 import { Curves, LANES, LANE_IDS, PEN_RAMP_SEC, DEFAULT_PITCH_SLOPE_LIMIT, CURVE_HOP_SEC, CURVE_SUB, upsample, upsampleVoiced, type LaneId } from './model/curves';
 import { offsetLane, resetLane, resetAll, drawLane, flattenRange, fillGaps, limitSlope, slopeMarginFrames } from './model/edits';
@@ -30,92 +39,76 @@ import { LoadTimings, analyseSource } from './loading';
 import { AICorrectionFlow } from './application/ai-correction-flow';
 import { AISettingsView } from './ui/ai-settings';
 import { updateBuiltinAIModel } from './analysis/builtin-ai';
-import { planAudioSegments } from './analysis/audio-segments';
+import { availableParallelWorkers, planBalancedAudioSegments } from './analysis/audio-segments';
 import { collectCorrectionNotesParallel } from './analysis/ai-candidate-pool';
+import { EditInspectorView, type EditParamKey } from './ui/edit-inspector';
+import { ToolLaneControlsView, type EditorTool } from './ui/tool-lane-controls';
+import { TransportView } from './ui/transport';
+import { ReferenceTrackControlsView } from './ui/reference-track-controls';
+import { HeaderPanelView } from './ui/header-panel';
+import { AIToolbarView } from './ui/ai-toolbar';
+import { EditorOptionsView } from './ui/editor-options';
+import { GlobalControlsView } from './ui/global-controls';
+import { DetectionControlsView } from './ui/detection-controls';
+import { LoadReportView } from './ui/load-report';
+import { WorkspaceLayoutView } from './ui/workspace-layout';
 
 const el = {
-	file: document.getElementById('file') as HTMLInputElement,
-	openAudio: document.getElementById('open-audio') as HTMLButtonElement,
-	play: document.getElementById('play') as HTMLButtonElement,
-	stop: document.getElementById('stop') as HTMLButtonElement,
-	clock: document.getElementById('clock')!,
-	status: document.getElementById('status')!,
 	stage: document.getElementById('stage')!,
 	pitchTrack: document.getElementById('pitch-track')!,
 	waveform: document.getElementById('waveform') as HTMLCanvasElement,
 	pianoroll: document.getElementById('pianoroll') as HTMLCanvasElement,
 	pianoKeys: document.getElementById('piano-keys')!,
-	keyFilter: document.getElementById('key-filter') as HTMLSelectElement,
-	hint: document.getElementById('hint')!,
-	panel: document.getElementById('panel')!,
-	selInfo: document.getElementById('sel-info')!,
-	shift: document.getElementById('shift') as HTMLInputElement,
-	shiftOut: document.getElementById('shift-out')!,
-	flatten: document.getElementById('flatten') as HTMLInputElement,
-	flattenOut: document.getElementById('flatten-out')!,
-	gain: document.getElementById('gain') as HTMLInputElement,
-	gainOut: document.getElementById('gain-out')!,
-	formant: document.getElementById('formant') as HTMLInputElement,
-	formantOut: document.getElementById('formant-out')!,
-	modeVoice: document.getElementById('mode-voice') as HTMLButtonElement,
-	modeInstrument: document.getElementById('mode-instrument') as HTMLButtonElement,
-	penOpts: document.getElementById('pen-opts')!,
 	hbar: document.getElementById('hbar')!,
 	vbar: document.getElementById('vbar')!,
-	vibDepth: document.getElementById('vib-depth') as HTMLInputElement,
-	vibRate: document.getElementById('vib-rate') as HTMLInputElement,
-	vibOnset: document.getElementById('vib-onset') as HTMLInputElement,
-	vibOn: document.getElementById('vib-on') as HTMLInputElement,
-	vibOnsetOn: document.getElementById('vib-onset-on') as HTMLInputElement,
-	vibUnit: document.getElementById('vib-unit')!,
-	laneChips: document.getElementById('lane-chips')!,
-	toolSelect: document.getElementById('tool-select') as HTMLButtonElement,
-	toolPen: document.getElementById('tool-pen') as HTMLButtonElement,
-	loopBtn: document.getElementById('loop-btn') as HTMLButtonElement,
-	followBtn: document.getElementById('follow-btn') as HTMLButtonElement,
-	clearSel: document.getElementById('clear-sel') as HTMLButtonElement,
 	globalBar: document.getElementById('global-bar')!,
 	waveTrack: document.getElementById('wave-track')!,
-	exportBtn: document.getElementById('export') as HTMLButtonElement,
-	saveBtn: document.getElementById('save') as HTMLButtonElement,
-	openProject: document.getElementById('open-project') as HTMLInputElement,
-	bgStatus: document.getElementById('bg-status')!,
-	bgText: document.getElementById('bg-text')!,
-	refFile: document.getElementById('bg-file') as HTMLInputElement,
-	refName: document.getElementById('bg-name')!,
-	refControls: document.getElementById('bg-controls')!,
-	refMute: document.getElementById('bg-mute') as HTMLButtonElement,
-	refVol: document.getElementById('bg-vol') as HTMLInputElement,
-	refVolOut: document.getElementById('bg-vol-out')!,
-	refOffset: document.getElementById('bg-offset') as HTMLInputElement,
-	refRemove: document.getElementById('bg-remove') as HTMLButtonElement,
 	waveSplitter: document.getElementById('wave-splitter')!,
 	ampZoom: document.getElementById('amp-zoom') as HTMLInputElement,
 	refwave: document.getElementById('refwave') as HTMLCanvasElement,
 	refSplitter: document.getElementById('ref-splitter')!,
 	refAmpZoom: document.getElementById('ref-amp-zoom') as HTMLInputElement,
-	refFileText: document.getElementById('bg-file-text')!,
-	ramp: document.getElementById('ramp') as HTMLInputElement,
-	slope: document.getElementById('slope') as HTMLInputElement,
 };
 
+// 版面選擇不屬於音訊／修音流程；它只把目前偏好映射成 body 的 CSS 狀態。
+new WorkspaceLayoutView(document.getElementById('workspace-selector')!);
+
+const headerPanel = new HeaderPanelView(document.querySelector('header')!, {
+	selectAudio: file => { void load(file); },
+	openAudio: () => { void openLocalAudio(); },
+	exportWav: () => { void exportWav(); },
+	saveProject,
+	openProject: file => { void openProject(file); },
+	setFormantFollow: follow => { void setMode(follow); },
+});
+headerPanel.setBuildVersion(`建置 ${__BUILD_TIME__}`);
 installTrainingLibrary(document.getElementById('training-library-open')!);
+
+const aiToolbar = new AIToolbarView(document.getElementById('ai-toolbar')!, {
+	openSettings: () => aiSettings.open(),
+	changeStrength: updateAIStrengthText,
+	correct: () => { void startAICorrection(); },
+	discard: () => { void discardAICorrection(); },
+	complete: () => { void completeAIReview(); },
+	cancel: cancelAICorrection,
+});
 
 const view = new ViewState();
 const waveform = new WaveformView(el.waveform, view);
 const refWave = new RefWaveformView(el.refwave, view);
 const pianoroll = new PianoRollView(el.pianoroll, view, el.pianoKeys);
-for (const mode of KEY_MODES) {
-	const group = document.createElement('optgroup');
-	group.label = mode.label;
-	for (const key of KEY_OPTIONS.filter(key => key.mode === mode.id)) {
-		group.appendChild(new Option(key.label, key.id));
-	}
-	el.keyFilter.appendChild(group);
-}
-el.keyFilter.addEventListener('change', () => {
-	pianoroll.setKeyFilter(KEY_OPTIONS.find(key => key.id === el.keyFilter.value) ?? null);
-	updateDetectionStatus();
+const editorOptions = new EditorOptionsView(document.getElementById('pitch-toolbar')!, {
+	keyChanged: value => {
+		pianoroll.setKeyFilter(KEY_OPTIONS.find(key => key.id === value) ?? null);
+		updateDetectionStatus();
+	},
+});
+editorOptions.populateKeys(KEY_MODES, KEY_OPTIONS);
+const globalControls = new GlobalControlsView(el.globalBar, {
+	changeSlope: setPitchSlopeLimit,
+	changeRamp: setRampMilliseconds,
+	reset: lane => { void resetSelectionLane(lane); },
+	clearSelection: () => { clearSelection(); hint(''); },
 });
 const player = new Player();
 const renderer = new Renderer();
@@ -149,8 +142,9 @@ const computeControl = new ComputeModeControl(
 	document.getElementById('compute-status')!,
 	() => workState.isBusy,
 );
+installPitchBenchmark(document.getElementById('compute-control')!, workState, computeControl);
 
-let tool: 'select' | 'pen' = 'select';
+let tool: EditorTool = 'select';
 /** 正在算繪的時間範圍（秒）。畫在兩個 canvas 上，讓使用者看得到「是這一段在跑」 */
 let renderingRange: { start: number; end: number } | null = null;
 /** 偵測到的音高，換算成 MIDI 半音刻度。壓平與畫筆都要用。 */
@@ -179,10 +173,14 @@ let selBase: Curves | null = null;
 /** 這一輪選取編輯有沒有已經把 selBase 推進 undo 堆疊了 */
 let sessionPushed = false;
 
-/** 面板上的活參數。全部都是「相對於 selBase」的量。 */
-const params = { shift: 0, alpha: 1, gainDb: 0, formant: 0 };
+const inspector = new EditInspectorView(document.getElementById('panel')!, {
+	preview: () => applyParams(),
+	commit: (key, label) => commitInspectorParam(key, label),
+});
+/** 面板上的活參數。狀態由顯示模組保存，應用層只讀取快照進行曲線運算。 */
+const params = inspector.params;
 
-const status = (msg: string) => { el.status.textContent = msg; };
+const status = (msg: string) => { headerPanel.setStatus(msg); };
 
 // ── 兩個時間軸 ──────────────────────────────────────────────────────────
 //
@@ -203,21 +201,21 @@ function outDuration(): number {
 	return curves ? curves.timeMap.srcToOut(source.duration) : source.duration;
 }
 
-const detectionStatus = document.getElementById('detection-status')!;
+const detectionControls = new DetectionControlsView(document.getElementById('detection-tools')!, {
+	detectAll: () => { if (source) detectionBar.set({ start: 0, end: outDuration() }); },
+	clear: () => detectionBar.set(null),
+});
 const detectionBar = new DetectionBar(document.getElementById('detection-bar')!, view, outDuration, range => {
 	pianoroll.detectionRange = range;
 	updateDetectionStatus(range);
+	rebuildReferenceBars();
 });
 function updateDetectionStatus(range = detectionBar.range) {
-	const key = KEY_OPTIONS.find(key => key.id === el.keyFilter.value);
-	detectionStatus.textContent = range
+	const key = KEY_OPTIONS.find(key => key.id === editorOptions.keyValue);
+	detectionControls.setStatus(range
 		? `${fmtTime(range.start)} ~ ${fmtTime(range.end)} · ${key ? `${key.label} 檢測中` : '選擇 Key 啟用檢測'}`
-		: '拖曳下方檢測 bar 設定範圍';
+		: '拖曳下方檢測 bar 設定範圍');
 }
-document.getElementById('detection-all')!.addEventListener('click', () => {
-	if (source) detectionBar.set({ start: 0, end: outDuration() });
-});
-document.getElementById('detection-clear')!.addEventListener('click', () => detectionBar.set(null));
 
 /** 目前被選取的錨點（id）。Shift+點擊可以多選；拖曳時一起移動，按 Delete 一起刪掉 */
 const selectedAnchors = new Set<number>();
@@ -245,7 +243,7 @@ function finishRenderProgress(label: string, error = false) {
 	renderProgress?.finish(label, error);
 	renderProgress = null;
 }
-const hint = (msg: string) => { el.hint.textContent = msg; };
+const hint = (msg: string) => { headerPanel.setHint(msg); };
 bindPianoAudition(el.pianoKeys, midi => pianoroll.setPressedMidi(midi), error => {
 	hint(`琴鍵試聽失敗：${error instanceof Error ? error.message : String(error)}`);
 }, loading => {
@@ -254,7 +252,7 @@ bindPianoAudition(el.pianoKeys, midi => pianoroll.setPressedMidi(midi), error =>
 
 // ── 載入 ────────────────────────────────────────────────────────────────
 
-const loadTimingsPanel = document.getElementById('load-timings') as HTMLDetailsElement;
+const loadReport = new LoadReportView(document.getElementById('load-timings') as HTMLDetailsElement);
 async function load(file: File, absolutePath: string | null = null): Promise<boolean> {
  if (!workState.canStart('load')) { hint('目前工作尚未完成，請等完成後再開啟音檔。'); return false; }
 
@@ -280,7 +278,6 @@ async function load(file: File, absolutePath: string | null = null): Promise<boo
  }
 	finally {
 		task.finish('讀取工作已結束');
-		el.file.value = '';
 	}
 	return success;
 }
@@ -290,11 +287,11 @@ async function loadOnce(file: File, progress: WorkTask): Promise<boolean> {
 	const timings = new LoadTimings();
 	let success = false, releasedBytes = 0;
 	let failureLabel = '讀取失敗';
+	let pitchPlanLabel = '';
 	const computeMode = computeControl.mode;
 	computeControl.start();
 	detectionBar.set(null);
-	loadTimingsPanel.hidden = true;
-	loadTimingsPanel.open = false;
+	loadReport.reset();
 	status(`解碼 ${file.name}…`);
 	try {
 		source = await decodeFile(file, (stage, fraction) => {
@@ -317,7 +314,7 @@ async function loadOnce(file: File, progress: WorkTask): Promise<boolean> {
 
 		el.stage.hidden = false;
 		el.globalBar.hidden = false;
-		el.play.disabled = el.stop.disabled = false;
+		transport.setEnabled(true);
 
 		baseInfo = `${source.name} · ${source.sampleRate}Hz · ${fmtTime(source.duration)}`;
 		status(`${baseInfo} · 偵測音高中…`);
@@ -325,15 +322,19 @@ async function loadOnce(file: File, progress: WorkTask): Promise<boolean> {
 		progress.update('載入音高模型');
 		timings.stage('啟動音高分析 Worker 與傳輸音訊');
 		let backendLabel = computeMode === 'gpu' ? 'GPU 優先' : 'CPU';
-		const result = await analyseSource(source, audio => detectPitch(audio, f => {
+		const result = await analyseSource(source, audio => detectPitchParallel(audio, {
+			onProgress: f => {
 			status(`${baseInfo} · 偵測音高中… ${(f * 100).toFixed(0)}%`);
 			progress.update('分析音高', f);
-		}, stage => {
+		}, onStage: stage => {
 			timings.stage(stage === '分析音高' ? `分析音高（${backendLabel}）` : stage);
 			progress.update(stage);
-		}, { mode: computeMode, onBackend: state => {
+		}, mode: computeMode, onBackend: state => {
 			backendLabel = state.backend === 'webgpu' ? 'WebGPU + WASM' : 'CPU / WASM';
 			computeControl.report(state);
+		}, onPlan: plan => {
+			pitchPlanLabel = `音高分段：${plan.segments} 段／${plan.workers} Worker（瀏覽器回報 ${plan.hardwareConcurrency} CPU 工作槽）／最低音壓窗 ${plan.quietWindowSeconds} 秒`;
+			console.info('[WiPitch] parallel pitch plan', plan);
 		} }));
 		track = result.track;
 		releasedBytes = result.releasedBytes;
@@ -348,7 +349,7 @@ async function loadOnce(file: File, progress: WorkTask): Promise<boolean> {
 		pitchMidi = upsample(track.f0.map(hzToMidi));
 		curveVoiced = upsampleVoiced(track.voiced);
 		pitchMidiFilled = fillGaps(pitchMidi, curveVoiced, 0, pitchMidi.length);
-		el.exportBtn.disabled = el.saveBtn.disabled = false;
+		headerPanel.setActions({ canOpenAudio: true, canOpenProject: true, canExport: true, canSave: true });
 		diagnostics?.applyViewParams();
 		status(baseInfo);
 		progress.finish('讀取與音高分析完成');
@@ -362,22 +363,25 @@ async function loadOnce(file: File, progress: WorkTask): Promise<boolean> {
 	} finally {
 		computeControl.finish(success);
 		const report = { file: file.name, fileBytes: file.size, mode: computeMode, success, releasedAnalysisBytes: releasedBytes, ...timings.finish() };
-		loadTimingsPanel.querySelector('summary')!.textContent = `載入耗時 ${(report.totalMs / 1000).toFixed(2)} 秒${success ? '' : '（失敗）'}`;
-		loadTimingsPanel.querySelector('pre')!.textContent = [
+		loadReport.show(`載入耗時 ${(report.totalMs / 1000).toFixed(2)} 秒${success ? '' : '（失敗）'}`, [
 			file.name,
+			...(pitchPlanLabel ? [pitchPlanLabel] : []),
 			...report.stages.map(row => `${row.stage}：${(row.ms / 1000).toFixed(3)} 秒`),
 			`已解除分析暫存引用：${(releasedBytes / 1048576).toFixed(1)} MiB`,
 			'階段耗時含等待；暫存實際回收時間由瀏覽器決定。',
-		].join('\n');
-		loadTimingsPanel.hidden = false;
+			].join('\n'));
 		console.info('[WiPitch] load timing', report);
 	}
 	return success;
 }
 
-el.file.addEventListener('change', () => { const f = el.file.files?.[0]; if (f) load(f); });
-el.openAudio.addEventListener('click', async () => {
+async function openLocalAudio() {
 	if (!workState.canStart('load')) { hint('目前工作尚未完成，請等完成後再開啟音檔。'); return; }
+	// 靜態部署及手機連線使用瀏覽器選檔，保留使用者手勢以相容 Safari。
+	if (!import.meta.env.DEV || !['localhost', '127.0.0.1'].includes(location.hostname)) {
+		document.querySelector<HTMLInputElement>('#file')!.click();
+		return;
+	}
 	try {
 		const picked = await pickLocalAudio();
 		if (!picked) { hint('已取消開啟音檔'); return; }
@@ -386,7 +390,7 @@ el.openAudio.addEventListener('click', async () => {
 	} catch (error) {
 		hint(`開啟音檔失敗：${error instanceof Error ? error.message : String(error)}`);
 	}
-});
+}
 
 document.addEventListener('dragover', e => {
 	e.preventDefault();
@@ -404,14 +408,9 @@ document.addEventListener('drop', e => {
 // ── 播放 ────────────────────────────────────────────────────────────────
 
 const syncPlayButton = () => {
-	// 只放圖示省空間，文字說明在 tooltip
-	el.play.textContent = player.isPlaying ? '‖' : '▶';
-	el.play.title = player.isPlaying ? '暫停（空白鍵）' : '播放（空白鍵）';
+	transport.setPlaying(player.isPlaying);
 };
 const togglePlay = () => { player.isPlaying ? player.pause() : player.play(); syncPlayButton(); };
-
-el.play.addEventListener('click', togglePlay);
-el.stop.addEventListener('click', () => { player.pause(); player.seek(0); syncPlayButton(); });
 player.onEnded = syncPlayButton;
 
 /**
@@ -424,7 +423,7 @@ player.onEnded = syncPlayButton;
 let followPlayhead = false;
 function toggleFollow() {
 	followPlayhead = !followPlayhead;
-	el.followBtn.classList.toggle('on', followPlayhead);
+	transport.setFollow(followPlayhead);
 	hint(followPlayhead ? '跟隨播放頭' : '跟隨播放頭已關閉');
 }
 
@@ -445,20 +444,23 @@ function toggleLoop() {
 		if (!selection) { hint('要先選一段才能循環'); return; }
 		player.setLoop({ ...selection });
 	}
-	el.loopBtn.classList.toggle('on', !!player.loopRegion);
+	transport.setLoop(!!player.loopRegion);
 	hint(player.loopRegion ? '循環播放選取範圍' : '循環已關閉');
 }
-el.loopBtn.addEventListener('click', toggleLoop);
-el.followBtn.addEventListener('click', toggleFollow);
+const transport = new TransportView(document.querySelector<HTMLElement>('header .transport')!, {
+	playPause: togglePlay,
+	stop: () => { player.pause(); player.seek(0); syncPlayButton(); },
+	toggleLoop,
+	toggleFollow,
+});
+syncPlayButton();
 
 // ── 工具與 lane 切換 ────────────────────────────────────────────────────
 
-function setTool(t: 'select' | 'pen') {
+let toolLaneControls: ToolLaneControlsView;
+function setTool(t: EditorTool) {
 	tool = t;
-	el.toolSelect.classList.toggle('on', t === 'select');
-	el.toolPen.classList.toggle('on', t === 'pen');
-	el.pitchTrack.classList.toggle('pen', t === 'pen');
-	el.waveTrack.classList.toggle('pen', t === 'pen');
+	toolLaneControls.setTool(t);
 	// 選取保留：切去畫筆畫幾筆再切回來，還是同一段可以繼續調
 	syncToolbar();
 }
@@ -471,8 +473,8 @@ function setTool(t: 'select' | 'pen') {
  * 工具列那一列一直都在（右邊有工具與 lane 切換），所以左邊換內容不會讓版面跳動。
  */
 function syncToolbar() {
-	el.penOpts.hidden = !!aiRegions.length || tool !== 'pen';
-	el.panel.hidden = !!aiRegions.length || tool !== 'select' || !selection;
+	editorOptions.setPenVisible(!aiRegions.length && tool === 'pen');
+	inspector.setVisible(!aiRegions.length && tool === 'select' && !!selection);
 }
 /**
  * 畫筆的抖音開關。
@@ -480,47 +482,22 @@ function syncToolbar() {
  * 有了開關之後，幅度就不必再用 0 當「關閉」的代名詞了——關掉時數值留著，
  * 下次打開就是上次的設定，不用重打一次。
  */
-function toggleVib(box: HTMLInputElement) {
-	box.checked = !box.checked;
-	syncPenOpts();
-	const what = box === el.vibOn ? '抖音' : '抖音漸入';
-	hint(`畫筆的${what}：${box.checked ? '開' : '關'}`);
+function toggleVib(onset: boolean) {
+	const enabled = editorOptions.toggleVibrato(onset);
+	hint(`畫筆的${onset ? '抖音漸入' : '抖音'}：${enabled ? '開' : '關'}`);
 }
 
-function syncPenOpts() {
-	el.vibDepth.disabled = el.vibRate.disabled = !el.vibOn.checked;
-	// 漸入只有在抖音本身開著的時候才有意義
-	el.vibOnsetOn.disabled = !el.vibOn.checked;
-	el.vibOnset.disabled = !el.vibOn.checked || !el.vibOnsetOn.checked;
-}
-el.vibOn.addEventListener('change', syncPenOpts);
-el.vibOnsetOn.addEventListener('change', syncPenOpts);
-syncPenOpts();
-
-el.toolSelect.addEventListener('click', () => setTool('select'));
-el.toolPen.addEventListener('click', () => setTool('pen'));
-
-// lane 的「顯示／編輯」小按鈕
-for (const id of LANE_IDS) {
-	const chip = document.createElement('div');
-	chip.className = 'lane-chip';
-	chip.innerHTML =
-		`<button class="eye" data-eye="${id}" title="顯示 ${LANES[id].label}（Shift+${LANE_IDS.indexOf(id) + 1}）">●</button>` +
-		`<button class="pick" data-pick="${id}" title="編輯 ${LANES[id].label}（${LANE_IDS.indexOf(id) + 1}）">${LANES[id].label}</button>`;
-	el.laneChips.appendChild(chip);
-	const eye = chip.querySelector('.eye') as HTMLElement;
-	eye.style.color = LANES[id].color;
-	eye.addEventListener('click', () => toggleLaneVisible(id));
-	chip.querySelector('.pick')!.addEventListener('click', () => setActiveLane(id));
-}
+toolLaneControls = new ToolLaneControlsView({
+	root: document.getElementById('lane-bar')!, pitchTrack: el.pitchTrack, waveTrack: el.waveTrack,
+	events: { selectTool: setTool, selectLane: setActiveLane, toggleLane: toggleLaneVisible },
+});
 
 function setActiveLane(id: LaneId) {
 	pianoroll.active = id;
-	el.vibUnit.textContent = LANES[id].unit;
+	editorOptions.setLaneUnit(id, LANES[id].unit);
 	// 要編輯的 lane 一定要看得見，不然會對著看不到的線亂調
 	pianoroll.visible.add(id);
-	// 面板只放目前這條 lane 的滑桿（抖動只作用在音高，歸在 pitch）
-	el.panel.querySelectorAll<HTMLElement>('[data-lane]').forEach(g => { g.hidden = g.dataset.lane !== id; });
+	inspector.setLane(id);
 	syncLaneChips();
 	hint(`編輯對象：${LANES[id].label}`);
 }
@@ -536,10 +513,7 @@ function toggleLaneVisible(id: LaneId) {
 }
 
 function syncLaneChips() {
-	for (const id of LANE_IDS) {
-		el.laneChips.querySelector(`[data-eye="${id}"]`)!.classList.toggle('on', pianoroll.visible.has(id));
-		el.laneChips.querySelector(`[data-pick="${id}"]`)!.classList.toggle('on', pianoroll.active === id);
-	}
+	toolLaneControls.syncLanes(pianoroll.active, pianoroll.visible);
 }
 setActiveLane('pitch');
 setTool('select');
@@ -551,7 +525,7 @@ document.addEventListener('keydown', e => {
 	if (workState.has('ai') || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement || (e.target instanceof Element && e.target.closest('dialog, #ai-toolbar'))) return;
 	if (aiRegions.length && !(e.code === 'Space' || ['l', 'f', 'm'].includes(e.key.toLowerCase()))) {
 		if ((e.ctrlKey || e.metaKey) && ['a', 'z'].includes(e.key.toLowerCase())) e.preventDefault();
-		hint('AI 修音審核中：只能上下拖曳黃色框調整音高，或按「取消AI修改」整體還原');
+		hint('AI 修音審核中：只能上下拖曳黃色框調整音高，或按「放棄」整體還原');
 		return;
 	}
 	// Alt 是畫筆的吸附鍵；不擋的話 Firefox 放開 Alt 會跳出選單列
@@ -581,7 +555,7 @@ document.addEventListener('keydown', e => {
 	else if (e.key.toLowerCase() === 'f') toggleFollow();
 	else if (e.key.toLowerCase() === 'm') toggleRefMute();
 	// 漸入是抖音的子選項，所以掛在同一個鍵的 Shift 上
-	else if (e.key.toLowerCase() === 'v') toggleVib(e.shiftKey ? el.vibOnsetOn : el.vibOn);
+	else if (e.key.toLowerCase() === 'v') toggleVib(e.shiftKey);
 });
 
 async function undo() {
@@ -674,7 +648,7 @@ function describeAnchors(delta = 0): string {
 }
 
 async function deleteAnchors(ids: number[]) {
- if(aiRegions.length){hint('請先取消 AI 修正標示，再刪除時間錨點');return;}
+ if(aiRegions.length){hint('請先按「完成工作」，再刪除時間錨點');return;}
 	if (!curves || workState.blocksEditing) return;
 	const before = curves.clone();
 	let removed = 0;
@@ -708,7 +682,7 @@ el.waveform.addEventListener('pointerdown', e => {
 	// 錨點在任何工具下都能選取與拖曳
 	const hit = curves && !workState.blocksEditing ? anchorAtX(x) : null;
 	if (hit !== null) {
-        if(aiRegions.length){hint('請先取消 AI 修正標示，再修改時間錨點');return;}
+        if(aiRegions.length){hint('請先按「完成工作」，再修改時間錨點');return;}
 		const list = curves!.timeMap.anchors;
 		if (e.shiftKey && anchorPivot !== null && curves!.timeMap.get(anchorPivot)) {
 			// Shift+點擊：從上次點的錨點到這個之間全部選起來（跟檔案總管一樣，取代原本的選取）
@@ -735,7 +709,7 @@ el.waveform.addEventListener('pointerdown', e => {
 	}
 	// 畫筆工具點波形 = 加錨點。加錨點本身不改變對應，所以不必重算
 	if (tool === 'pen' && curves && !workState.blocksEditing) {
-        if(aiRegions.length){hint('請先取消 AI 修正標示，再修改時間錨點');return;}
+        if(aiRegions.length){hint('請先按「完成工作」，再修改時間錨點');return;}
 		const before = curves.clone();
 		const a = curves.timeMap.add(t);
 		if (!a) { hint('這裡跟既有的錨點重疊了'); return; }
@@ -891,8 +865,7 @@ el.pianoroll.addEventListener('pointermove', e => {
 		if (!drag.moved) return;
 		// 往上 = 起伏放大，往下 = 壓平；100px 一倍
 		const alpha = Math.max(0, Math.min(4, Math.round((drag.startAlpha + (drag.startY - y) / 100) * 100) / 100));
-		el.flatten.value = String(alpha);
-		el.flatten.dispatchEvent(new Event('input'));
+		inspector.setParam('alpha', alpha);
 		hint(`抖動 ${alpha.toFixed(2)}×（0 = 壓平，1 = 原樣）`);
 	} else if (selection) {
 		if (Math.abs(y - drag.startY) >= 3) drag.moved = true;
@@ -943,7 +916,7 @@ el.pianoroll.addEventListener('pointerup', async e => {
 	}
 
 	if (!mode.moved) { player.seek(mode.t); return; }
-	if (mode.kind === 'vibrato') { el.flatten.dispatchEvent(new Event('change')); return; }
+	if (mode.kind === 'vibrato') { inspector.commit('alpha'); return; }
 	// 垂直拖曳結束 → 記錄一步可復原的動作，然後重算那一段
 	if (!selection || sameCurves(mode.base, curves)) return;
 	history.push(mode.base);
@@ -977,9 +950,10 @@ function penTo(t0: number, t1: number, y0: number, y1: number, snap: boolean, st
 	const [ta, tb] = t0 <= t1 ? [t0, t1] : [t1, t0];
 	const [ya, yb] = t0 <= t1 ? [y0, y1] : [y1, y0];
 	const span = Math.max(1e-6, tb - ta);
-	const vibDepth = el.vibOn.checked ? Math.max(0, parseFloat(el.vibDepth.value) || 0) : 0;
-	const vibRate = Math.max(0.1, parseFloat(el.vibRate.value) || 5.5);
-	const onsetSec = el.vibOnsetOn.checked ? Math.max(0, parseFloat(el.vibOnset.value) || 0) / 1000 : 0;
+	const pen = editorOptions.pen;
+	const vibDepth = pen.enabled ? pen.depth : 0;
+	const vibRate = pen.rate;
+	const onsetSec = pen.onsetSec;
 	// t0/t1/startT 都是輸出時間。抖音的速率與漸入照「畫的當下看到的時間」算，
 	// 所以用輸出時間；之後再拉動錨點，抖音會跟著原唱一起變快變慢。
 	const vib = (t: number) => {
@@ -1012,11 +986,10 @@ function penTo(t0: number, t1: number, y0: number, y1: number, snap: boolean, st
 function selectionChanged() {
 	// 底部列的歸零與取消選取只有在有選取時才能按
 	const none = !selection || !curves;
-	document.querySelectorAll<HTMLButtonElement>('[data-reset]').forEach(b => { b.disabled = none; });
-	el.clearSel.disabled = none;
+	globalControls.setSelectionActive(!none);
 	syncToolbar();
 	if (!selection || !curves) {
-		el.selInfo.textContent = '尚未選取';
+		inspector.setSelectionLabel('尚未選取');
 		selBase = null;
 		sessionPushed = false;
 		return;
@@ -1024,35 +997,22 @@ function selectionChanged() {
 	selBase = curves.clone();
 	sessionPushed = false;
 	resetParams();
-	el.selInfo.textContent =
-		`${fmtTime(selection.start)} ~ ${fmtTime(selection.end)}（${(selection.end - selection.start).toFixed(2)}s）`;
+	inspector.setSelectionLabel(
+		`${fmtTime(selection.start)} ~ ${fmtTime(selection.end)}（${(selection.end - selection.start).toFixed(2)}s）`,
+	);
 }
 
 function clearSelection() {
 	selection = null;
 	player.setLoop(null);
-	el.loopBtn.classList.remove('on');
+	transport.setLoop(false);
 	selectionChanged();
 }
-
-el.clearSel.addEventListener('click', () => { clearSelection(); hint(''); });
 
 // ── 面板參數（活的，隨時可以來回調） ────────────────────────────────────
 
 function resetParams() {
-	params.shift = 0; params.alpha = 1; params.gainDb = 0; params.formant = 0;
-	el.shift.value = '0';
-	el.flatten.value = '1';
-	el.gain.value = '0';
-	el.formant.value = '0';
-	syncParamLabels();
-}
-
-function syncParamLabels() {
-	el.shiftOut.textContent = `${params.shift >= 0 ? '+' : ''}${params.shift.toFixed(2)} 半音`;
-	el.flattenOut.textContent = `${params.alpha.toFixed(2)}×`;
-	el.gainOut.textContent = `${params.gainDb >= 0 ? '+' : ''}${params.gainDb.toFixed(1)} dB`;
-	el.formantOut.textContent = `${params.formant >= 0 ? '+' : ''}${params.formant.toFixed(2)} 半音`;
+	inspector.reset();
 }
 
 /**
@@ -1099,33 +1059,17 @@ function editRange(base: Curves, fromOut: number, toOut_: number): { from: numbe
 	return { from: Math.min(fromOut, toOut(d.from)), to: Math.max(toOut_, toOut(d.to)) };
 }
 
-const sliders: { input: HTMLInputElement; key: keyof typeof params; label: string }[] = [
-	{ input: el.shift, key: 'shift', label: '音高' },
-	{ input: el.flatten, key: 'alpha', label: '抖動' },
-	{ input: el.gain, key: 'gainDb', label: '音量' },
-	{ input: el.formant, key: 'formant', label: 'Formant' },
-];
-
-for (const s of sliders) {
-	// 拖曳過程只更新曲線和畫面，不算繪——不然會卡成一團
-	s.input.addEventListener('input', () => {
-		if (workState.blocksEditing || aiRegions.length) return;
-		params[s.key] = parseFloat(s.input.value);
-		syncParamLabels();
-		applyParams();
-	});
-	// 放開才真的算繪
-	s.input.addEventListener('change', async () => {
-		if (!curves || !selBase || !selection || workState.blocksEditing || aiRegions.length) return;
-		applyParams();
-		if (!sessionPushed) {
-			if (sameCurves(selBase, curves)) return;   // 拉了又拉回中性，不必留一步 undo
-			history.push(selBase);
-			sessionPushed = true;
-		}
-		const r = editRange(selBase, selection.start, selection.end);
-		await rerender(r.from, r.to, s.label, ['shift', 'alpha'].includes(s.key) ? { ...selection } : undefined);
-	});
+// 顯示模組只發出意圖；提交、復原紀錄與算繪仍由應用層統一處理。
+async function commitInspectorParam(key: EditParamKey, label: string) {
+	if (!curves || !selBase || !selection || workState.blocksEditing || aiRegions.length) return;
+	applyParams();
+	if (!sessionPushed) {
+		if (sameCurves(selBase, curves)) return;
+		history.push(selBase);
+		sessionPushed = true;
+	}
+	const r = editRange(selBase, selection.start, selection.end);
+	await rerender(r.from, r.to, label, ['shift', 'alpha'].includes(key) ? { ...selection } : undefined);
 }
 
 /**
@@ -1139,32 +1083,16 @@ async function setMode(follow: 0 | 1) {
 	if (workState.blocksEditing) return;
 	const changed = renderer.formantFollow !== follow;
 	renderer.formantFollow = follow;
-	el.modeVoice.classList.toggle('on', follow === 0);
-	el.modeInstrument.classList.toggle('on', follow === 1);
+	headerPanel.setFormantFollow(follow);
 	if (!changed || !curves) return;
 	// 只有已經移調過的地方會受影響，沒移調的地方 r·Δ = 0
 	const r = editedPitchRange();
 	if (!r) { hint(follow ? '樂器模式（目前還沒有移調的段落）' : '人聲模式'); return; }
 	await rerender(r.from, r.to, follow ? '樂器模式' : '人聲模式');
 }
-el.modeVoice.addEventListener('click', () => setMode(0));
-el.modeInstrument.addEventListener('click', () => setMode(1));
-
-el.panel.querySelectorAll('[data-nudge]').forEach(btn => {
-	btn.addEventListener('click', () => {
-		if (aiRegions.length) { hint('AI 修音審核中：只能上下拖曳黃色框調整音高'); return; }
-		const amount = parseFloat((btn as HTMLElement).dataset.nudge!);
-		el.shift.value = String(Math.max(-12, Math.min(12, params.shift + amount)));
-		el.shift.dispatchEvent(new Event('input'));
-		el.shift.dispatchEvent(new Event('change'));
-	});
-});
-
 // 把選取範圍的編輯清掉，回到原始聲音
-document.querySelectorAll('[data-reset]').forEach(btn => {
-	btn.addEventListener('click', async () => {
+async function resetSelectionLane(which: LaneId | 'all') {
 		if (!curves || !selection || workState.blocksEditing || aiRegions.length) return;
-		const which = (btn as HTMLElement).dataset.reset!;
 		const before = curves.clone();
 		// 只歸零曲線數值；錨點與伸縮不動。範圍換到原始時間，因為曲線存在那裡
 		const s = srcSel()!;
@@ -1178,8 +1106,7 @@ document.querySelectorAll('[data-reset]').forEach(btn => {
 		selBase = curves.clone();
 		sessionPushed = false;
 		resetParams();
-	});
-});
+	}
 
 // ── Ramp 長度 ───────────────────────────────────────────────────────────
 
@@ -1187,35 +1114,35 @@ document.querySelectorAll('[data-reset]').forEach(btn => {
 // 畫筆固定用 PEN_RAMP_SEC。曲線裡仍然每條 lane 各存一份，舊專案檔讀得進來。
 function syncRampInputs() {
 	if (!curves) return;
-	el.ramp.value = String(Math.round(curves.rampSec.pitch * 1000));
-	el.slope.value = String(curves.pitchSlopeLimit);
+	globalControls.setRampMilliseconds(Math.round(curves.rampSec.pitch * 1000));
+	globalControls.setSlope(curves.pitchSlopeLimit);
 }
 
 // 音高變化上限：只影響之後的編輯（跟邊界過渡一樣），不回頭改已經做好的曲線
-el.slope.addEventListener('change', () => {
+function setPitchSlopeLimit(value: number) {
 	if (!curves) return;
-	const v = Math.max(0, Math.min(1000, parseFloat(el.slope.value)));
+	const v = Math.max(0, Math.min(1000, value));
 	const limit = isFinite(v) ? v : DEFAULT_PITCH_SLOPE_LIMIT;
-	el.slope.value = String(limit);
+	globalControls.setSlope(limit);
 	curves.pitchSlopeLimit = limit;
 	if (selBase) selBase.pitchSlopeLimit = limit;
 	hint(limit > 0 ? `音高變化上限：每秒 ${limit} 半音` : '音高變化上限：不限制');
-});
+}
 
-el.ramp.addEventListener('change', () => {
+function setRampMilliseconds(value: number) {
 	if (!curves) return;
-	const ms = Math.max(5, Math.min(500, parseFloat(el.ramp.value) || 100));
-	el.ramp.value = String(ms);
+	const ms = Math.max(5, Math.min(500, value || 100));
+	globalControls.setRampMilliseconds(ms);
 	for (const id of LANE_IDS) {
 		curves.rampSec[id] = ms / 1000;
 		if (selBase) selBase.rampSec[id] = ms / 1000;
 	}
 	hint(`邊界過渡：${ms}ms`);
-});
+}
 
 // ── 匯出與存檔 ──────────────────────────────────────────────────────────
 
-el.exportBtn.addEventListener('click', async () => {
+async function exportWav() {
 	if (!source) return;
 	const task = workState.tryBegin('export', '準備匯出 WAV');
 	if (!task) return;
@@ -1251,9 +1178,9 @@ el.exportBtn.addEventListener('click', async () => {
 		const message = `匯出失敗：${error instanceof Error ? error.message : String(error)}`;
 		hint(message); task.finish(message, true);
 	} finally { task.finish('匯出工作已結束'); }
-});
+	}
 
-el.saveBtn.addEventListener('click', () => {
+function saveProject() {
 	if (!source || !curves || workState.blocksEditing) return;
 	if (!sourceAbsolutePath) {
 		hint('無法存檔：目前音訊沒有絕對路徑，請用「開啟音檔」重新選擇原始音訊');
@@ -1261,15 +1188,13 @@ el.saveBtn.addEventListener('click', () => {
 	}
 	const name = source.name.replace(/\.[^.]+$/, '') + '.wipitch.json';
 	const text = serialize(curves, source.name, sourceAbsolutePath, source.sampleRate, source.duration, renderer.formantFollow,
-		ref.name ? { name: ref.name, gainDb: ref.gainDb, muted: ref.muted, offsetSec: ref.offsetSec } : undefined);
+		ref.name ? { name: ref.name, gainDb: ref.gainDb, muted: ref.muted, offsetSec: ref.offsetSec, beatAnchorSec: ref.beatAnchorSec, tempoBpm: Number(tempoBpm.value), tempoMeter: tempoMeter.value, barStartsSec: syncedReferenceRhythm?.barStartsSec ?? [], beatRecords: referenceBeatRecords } : undefined);
 	downloadBlob(new Blob([text], { type: 'application/json' }), name);
 	hint(`已存檔 ${name}`);
-});
+	}
 
-el.openProject.addEventListener('change', async () => {
- if(aiRegions.length){hint('請先取消 AI 修正標示，再讀取專案');el.openProject.value='';return;}
-	const f = el.openProject.files?.[0];
-	if (!f) return;
+async function openProject(f: File) {
+ if(aiRegions.length){hint('請先按「完成工作」，再讀取專案');return;}
 	let progress: WorkTask | null = null;
 	try {
 		const text = await f.text();
@@ -1290,8 +1215,7 @@ el.openProject.addEventListener('change', async () => {
 		curves = loaded.curves;
 		// 模式是全域設定，也要跟著專案檔回來——不然讀檔後聲音會跟存檔前不一樣
 		renderer.formantFollow = loaded.formantFollow;
-		el.modeVoice.classList.toggle('on', loaded.formantFollow === 0);
-		el.modeInstrument.classList.toggle('on', loaded.formantFollow === 1);
+		headerPanel.setFormantFollow(loaded.formantFollow === 1 ? 1 : 0);
 		syncRampInputs();
 		clearSelection();
 		selectedAnchors.clear();
@@ -1308,6 +1232,11 @@ el.openProject.addEventListener('change', async () => {
 		if (bgSaved && bgSaved.name === ref.name) {
 			// 同一個背景已經載入了，直接套用設定
 			ref.gainDb = bgSaved.gainDb; ref.muted = bgSaved.muted; ref.offsetSec = bgSaved.offsetSec;
+			ref.beatAnchorSec = bgSaved.beatAnchorSec ?? null;
+			referenceBarStarts = bgSaved.barStartsSec?.filter(Number.isFinite) ?? [];
+			referenceBeatRecords = restoreReferenceBeats(bgSaved.beatRecords);
+			if (bgSaved.tempoBpm) tempoBpm.value = String(bgSaved.tempoBpm);
+			if (bgSaved.tempoMeter) tempoMeter.value = bgSaved.tempoMeter;
 			applyRefToPlayer();
 		} else if (bgSaved) {
 			pendingRefSettings = bgSaved;
@@ -1323,9 +1252,8 @@ el.openProject.addEventListener('change', async () => {
 	} finally {
 		showProgress(null);
 		progress?.finish('專案讀取工作已結束');
-		el.openProject.value = '';
 	}
-});
+}
 
 /** 拖曳時顯示「現在大概落在哪個音」，方便對照 */
 function describeTarget(amount: number): string {
@@ -1360,8 +1288,8 @@ async function rerender(fromSec: number, toSec: number, label: string, manualRan
  const afterCurves = curves.clone();
  // Snapshot the visible selection before rendering; export must not reread the UI.
  const keySelection = {
-  value: el.keyFilter.value,
-  label: el.keyFilter.selectedOptions[0]?.textContent ?? '全部音',
+	 value: editorOptions.keyValue,
+	 label: editorOptions.keyLabel,
   capturedAt: new Date().toISOString(),
  };
  const optionKey = KEY_OPTIONS.find(key => key.id === keySelection.value);
@@ -1370,7 +1298,7 @@ async function rerender(fromSec: number, toSec: number, label: string, manualRan
   keySelection,
   editRange: manualRange, detectionRange: detectionBar.range ? { ...detectionBar.range } : null,
   renderRange: { start: fromSec, end: toSec }, parameters: { ...params },
-  pen: { depth: el.vibDepth.value, rate: el.vibRate.value, onset: el.vibOnset.value, enabled: el.vibOn.checked },
+	 pen: editorOptions.pen,
   pitchSlopeLimit: curves.pitchSlopeLimit, ramp: { ...curves.rampSec },
   anchors: curves.timeMap.anchors.map(anchor => ({ ...anchor })), formantFollow: renderer.formantFollow,
   audioStage: 'interactive-render-before-background-refinement' };
@@ -1446,8 +1374,7 @@ renderer.onBackground = syncBackgroundStatus;
 function syncBackgroundStatus() {
 	const p = renderer.backgroundProgress;
 	const waiting = !!bgTimer && !!bgPendingRange;
-	el.bgStatus.hidden = p === null && !waiting;
-	el.bgText.textContent = p === null ? '背景精算（等待中）' : `背景精算 ${Math.round(p * 100)}%`;
+	headerPanel.setBackgroundProgress(p === null && !waiting ? null : p === null ? '背景精算（等待中）' : `背景精算 ${Math.round(p * 100)}%`);
 	if (p !== null || waiting) {
 		backgroundTask ??= workState.begin('background', '背景精算');
 		backgroundTask.update(p === null ? '背景精算（等待中）' : '背景精算', p);
@@ -1466,12 +1393,15 @@ async function waitBackground() {
 
 // ── 時間軸操作 ──────────────────────────────────────────────────────────
 
-// 曲線區以紅色播放線縮放時間軸；琴鍵與右側捲軸以游標高度縮放縱軸。
-bindZoomGesture(el.pianoroll, factor => {
-	view.zoomAt(view.timeToX(player.position), factor, el.pianoroll.clientWidth);
-}, () => source !== null);
+// 曲線區以游標所在時間縮放；琴鍵與右側捲軸以游標高度縮放縱軸。
+const zoomTimelineAtPointer = (factor: number, clientX: number) => {
+	const rect = el.pianoroll.getBoundingClientRect();
+	const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
+	view.zoomAt(x, factor, el.pianoroll.clientWidth);
+};
+bindZoomGesture(el.pianoroll, zoomTimelineAtPointer, () => source !== null);
 for (const target of [el.pianoKeys, el.vbar]) {
-	bindZoomGesture(target, (factor, clientY) => {
+	bindZoomGesture(target, (factor, _clientX, clientY) => {
 		const rect = el.pianoroll.getBoundingClientRect();
 		pianoroll.zoomV(factor, Math.max(0, Math.min(rect.height, clientY - rect.top)), rect.height);
 	}, () => source !== null);
@@ -1585,10 +1515,25 @@ el.refAmpZoom.value = String(ampToFraction(1));
 el.refAmpZoom.addEventListener('input', () => setRefAmpZoom(fractionToAmp(parseFloat(el.refAmpZoom.value))));
 el.refAmpZoom.addEventListener('dblclick', () => setRefAmpZoom(1));
 
-// 參考音軌上也能拉選取、點一下定位播放頭（沒有錨點）
+let refBeatDrag: { pointerId: number; firstBeatSec: number; original: ReferenceBeatRecord[]; bars: number[]; anchor: number | null; startTime: number } | null = null;
+// 參考音軌底部的紅色第一拍可拖動；其他位置維持既有選取／定位操作。
 el.refwave.addEventListener('pointerdown', e => {
 	if (!source) return;
 	const t = Math.max(0, Math.min(outDuration(), view.xToTime(e.clientX - el.refwave.getBoundingClientRect().left)));
+	if (!workState.isBusy && ref.name && referenceBeatRecords.length && e.clientY - el.refwave.getBoundingClientRect().top >= el.refwave.clientHeight - 19) {
+		let firstBeatSec: number | null = null, distance = 8;
+		for (const row of referenceBeatRecords) {
+			if (row.beatInBar !== 1) continue;
+			const dx = Math.abs(view.timeToX(row.timeSec) - (e.clientX - el.refwave.getBoundingClientRect().left));
+			if (dx < distance) { firstBeatSec = row.timeSec; distance = dx; }
+		}
+		if (firstBeatSec !== null) {
+			refBeatDrag = { pointerId: e.pointerId, firstBeatSec, original: referenceBeatRecords,
+				bars: [...referenceBarStarts], anchor: ref.beatAnchorSec, startTime: t };
+			el.refwave.setPointerCapture(e.pointerId);
+			return;
+		}
+	}
 	if (aiRegions.length) {
 		player.seek(t);
 		hint('AI 修音審核中：只能上下拖曳黃色框調整音高');
@@ -1600,17 +1545,213 @@ el.refwave.addEventListener('pointerdown', e => {
 	waveSelect = { anchor: t, moved: false };
 	el.refwave.setPointerCapture(e.pointerId);
 });
-el.refwave.addEventListener('pointermove', e => waveSelectMove(el.refwave, e.clientX));
-el.refwave.addEventListener('pointerup', e => waveSelectEnd(el.refwave, e.pointerId));
+el.refwave.addEventListener('pointermove', e => {
+	if (refBeatDrag?.pointerId === e.pointerId) {
+		const drag = refBeatDrag;
+		const t = view.xToTime(e.clientX - el.refwave.getBoundingClientRect().left);
+		const previous = [...drag.original].reverse().find(row => row.timeSec < drag.firstBeatSec - 0.001);
+		const last = drag.original[drag.original.length - 1];
+		const minimum = previous ? previous.timeSec + 0.05 - drag.firstBeatSec : -drag.firstBeatSec;
+		const maximum = ref.offsetSec + (referenceCache?.duration ?? 0) - last.timeSec;
+		const shift = Math.max(minimum, Math.min(maximum, t - drag.startTime));
+		referenceBeatRecords = shiftReferenceBeats(drag.original, shift, drag.firstBeatSec - 0.001);
+		referenceBarStarts = drag.bars.map(bar => bar >= drag.firstBeatSec - 0.001 ? bar + shift : bar);
+		ref.beatAnchorSec = drag.anchor !== null && drag.anchor >= drag.firstBeatSec - 0.001 ? drag.anchor + shift : drag.anchor;
+		hint(`第一拍偏移 ${shift >= 0 ? '+' : ''}${Math.round(shift * 1000)} ms；後續拍點同步調整`);
+		return;
+	}
+	waveSelectMove(el.refwave, e.clientX);
+});
+el.refwave.addEventListener('pointerup', e => {
+	if (refBeatDrag?.pointerId === e.pointerId) {
+		refBeatDrag = null;
+		el.refwave.releasePointerCapture(e.pointerId);
+		if (syncedReferenceRhythm) syncedReferenceRhythm = { ...syncedReferenceRhythm,
+			anchorSec: ref.beatAnchorSec ?? syncedReferenceRhythm.anchorSec, barStartsSec: [...referenceBarStarts] };
+		const average = averageBarBpm(referenceBarStarts, Number(tempoBpm.value), tempoMeter.value);
+		if (average !== null && !averageBpmOutput.hidden) averageBpmOutput.textContent = `範圍平均 BPM ${average.toFixed(1)}`;
+		return;
+	}
+	waveSelectEnd(el.refwave, e.pointerId);
+});
+el.refwave.addEventListener('pointercancel', e => {
+	if (refBeatDrag?.pointerId !== e.pointerId) return;
+	referenceBarStarts = refBeatDrag.bars;
+	referenceBeatRecords = refBeatDrag.original;
+	ref.beatAnchorSec = refBeatDrag.anchor;
+	refBeatDrag = null;
+});
 
 // ── 背景參考音軌 ────────────────────────────────────────────────────────
 //
 // 修主唱時一邊聽伴奏才知道對不對得準。只用來監聽：不跟著錨點伸縮、不會匯出。
 // 存檔只記設定，讀檔後請使用者重新載入同名檔。
 
-const ref = { name: null as string | null, gainDb: 0, muted: false, offsetSec: 0 };
+const ref = { name: null as string | null, gainDb: 0, muted: false, offsetSec: 0, beatAnchorSec: null as number | null };
+let referenceCache: ReferenceCache | null = null;
+let rhythmGeneration = 0;
+let referenceSyncEnabled = false;
+let referenceBarStarts: number[] = [];
+let referenceBeatRecords: ReferenceBeatRecord[] = [];
+let referenceBeatsCommitted = false;
+let lastReferenceAnalysisRange: { start: number; end: number } | null = null;
+let refAudio: { channels: Float32Array[]; sampleRate: number } | null = null;
+let syncedReferenceRhythm: ReferenceRhythm | null = null;
+const averageBpmOutput = document.getElementById('ref-average-bpm') as HTMLOutputElement;
+const anchorButton = document.getElementById('ref-anchor-set') as HTMLButtonElement;
+anchorButton.addEventListener('click', () => {
+	if (!referenceCache || workState.isBusy) { hint('請先載入參考音軌並等待工作完成'); return; }
+	const redline = player.position;
+	const onset = findOnset(referenceCache, redline - ref.offsetSec, 0.5);
+	ref.beatAnchorSec = onset === null ? redline : onset + ref.offsetSec;
+	rebuildReferenceBars();
+	syncRefUi();
+	hint(onset === null
+		? '紅線左右 0.5 秒內未找到明確起音，暫以紅線錨定並預覽前後四小節'
+		: `已吸附附近起音 ${fmtTime(ref.beatAnchorSec)}；黃三角為 BPM 前後四小節預覽，不需選取檢測範圍`);
+});
+const syncButton = document.getElementById('sync-reference') as HTMLButtonElement;
+const tempoBpm = document.getElementById('tempo-bpm') as HTMLInputElement;
+const tempoMeter = document.getElementById('tempo-meter') as HTMLSelectElement;
+tempoBpm.addEventListener('change', rebuildReferenceBars);
+tempoMeter.addEventListener('change', rebuildReferenceBars);
+function rebuildReferenceBars() {
+	++rhythmGeneration;
+	referenceBarStarts = [];
+	referenceBeatsCommitted = false;
+	syncedReferenceRhythm = null;
+	averageBpmOutput.hidden = true;
+	averageBpmOutput.textContent = '';
+	document.getElementById('ref-beat-status')!.textContent = !ref.name ? '尚未載入參考音軌'
+		: `${referenceBeatRecords.length ? `已記錄 ${referenceBeatRecords.length} 拍 · ` : ''}${ref.beatAnchorSec === null ? '尚未錨定' : 'BPM 預覽 · 前後各 4 小節'}`;
+	if (!referenceCache || ref.beatAnchorSec === null) return;
+	const bpm = Number(tempoBpm.value);
+	if (!Number.isFinite(bpm) || bpm < 30 || bpm > 300) return;
+	referenceBarStarts = referenceBeatPreview(ref.beatAnchorSec, bpm, tempoMeter.value,
+		Math.max(0, ref.offsetSec), referenceCache.duration + ref.offsetSec);
+}
+syncButton.addEventListener('click', () => {
+	if (syncButton.disabled) return;
+	referenceSyncEnabled = !referenceSyncEnabled;
+	syncReferenceButton();
+	hint(referenceSyncEnabled ? '已啟用同步參考音軌；按 AI 檢測後分析反白範圍' : '已關閉同步參考音軌');
+});
+async function analyzeSynchronizedTracks(): Promise<boolean> {
+	if (workState.isBusy) return false;
+	if (!refAudio || ref.beatAnchorSec === null) { hint('請載入參考音軌，並先設定節拍錨點'); return false; }
+	const selectedRange = detectionBar.range;
+	if (!selectedRange || selectedRange.end <= selectedRange.start) { hint('請先在檢測列標示反白範圍'); return false; }
+	const range = { ...selectedRange };
+	if (!referenceCache) return false;
+	const a = Math.max(0, Math.ceil((range.start - ref.offsetSec) * 100) / 100);
+	const b = Math.min(referenceCache.duration, range.end - ref.offsetSec);
+	if (b <= a) { hint('檢測範圍與參考音軌沒有重疊'); return false; }
+	const rough = Number(tempoBpm.value);
+	if (!Number.isFinite(rough) || rough < 30 || rough > 300) { hint('BPM 請輸入 30～300'); return false; }
+	const audio = referenceCache.mono16k.slice(Math.ceil(a * 16000), Math.floor(b * 16000));
+	if (!source || !curves || !track) { hint('請先載入主音軌'); return false; }
+	const task = workState.tryBegin('reference', '並行分析主音高、參考音高與節拍');
+	if (!task || !referenceCache) return false;
+	referenceBeatsCommitted = false;
+	const generation = ++rhythmGeneration;
+	const mainSource = source, mainTrack = track;
+	const srcStart = curves.timeMap.outToSrc(range.start), srcEnd = curves.timeMap.outToSrc(range.end);
+	const mainStart = Math.floor(srcStart * 16000 / 256) * 256 / 16000;
+	const offset = ref.offsetSec, anchorSec = ref.beatAnchorSec, meter = tempoMeter.value;
+	const mode = computeControl.mode;
+	const workerLimit = Math.max(1, Math.floor(availableParallelWorkers(mode === 'gpu' ? 'gpu' : 'cpu') / 2));
+	const mainTask = workState.begin('main-pitch', '主音軌：準備多 Worker 音高分析');
+	const referenceTask = workState.begin('reference-pitch', '參考音軌：多 Worker 音高分析');
+	const rhythmTask = workState.begin('rhythm', '節拍：獨立 Worker 依序追蹤');
+	syncButton.disabled = true;
+	try {
+		const result = await concurrentAnalysis({
+			mainPitch: async () => {
+				try { return await detectPitchParallel(await sourceRangeMono16k(mainSource, mainStart, srcEnd), {
+					mode, workerLimit, onProgress: f => mainTask.update('主音軌：多 Worker 音高分析', f),
+				}); } finally { mainTask.finish('主音軌音高工作結束'); }
+			},
+			referencePitch: async () => {
+				try { return await detectPitchParallel(audio, { mode, workerLimit,
+					onProgress: f => referenceTask.update('參考音軌：多 Worker 音高分析', f),
+				}); } finally { referenceTask.finish('參考音軌音高工作結束'); }
+			},
+			rhythm: async () => {
+				try { return await detectReferenceRhythm({ audio,
+					onsets: referenceCache!.onsets.slice(Math.round(a * 100), Math.floor(b * 100)),
+					anchorSec: anchorSec - offset - a, bpm: rough, meter, estimate: true,
+				}); } finally { rhythmTask.finish('節拍追蹤工作結束'); }
+			},
+		});
+		if (generation !== rhythmGeneration) return false;
+		tempoBpm.value = String(result.rhythm.bpm);
+		ref.beatAnchorSec = result.rhythm.anchorSec + offset + a;
+		referenceBarStarts = result.rhythm.barStartsSec.map(t => t + offset + a);
+		syncedReferenceRhythm = { bpm: result.rhythm.bpm, meter, anchorSec: ref.beatAnchorSec, barStartsSec: [...referenceBarStarts] };
+		lastReferenceAnalysisRange = range;
+		const average = averageBarBpm(referenceBarStarts, result.rhythm.bpm, meter);
+		averageBpmOutput.textContent = average === null
+			? `範圍估計 BPM ${result.rhythm.bpm.toFixed(1)}`
+			: `範圍平均 BPM ${average.toFixed(1)}`;
+		averageBpmOutput.hidden = false;
+		document.getElementById('ref-beat-status')!.textContent = `已分析 · ${referenceBarStarts.length} 個小節起點`;
+		{
+			const track = result.referencePitch;
+			const pitch: { timeSec: number; midi: number }[] = [];
+			for (let i = 0; i < track.length; i += 6) {
+				const timeSec = a + ref.offsetSec + (i * 256 + 127.5) / 16000;
+				if (track.voiced[i] && timeSec >= range.start && timeSec <= range.end) pitch.push({ timeSec, midi: hzToMidi(track.f0[i]) });
+			}
+			syncedReferenceRhythm.pitch = pitch;
+		}
+		// 局部分析以原始時間格對齊，只提交檢測範圍內的主音高格。
+		const frameOffset = Math.round(mainStart * 16000 / 256);
+		for (let i = 0; i < result.mainPitch.length && frameOffset + i < mainTrack.length; i++) {
+			const time = mainStart + (i * 256 + 127.5) / 16000;
+			if (time < srcStart || time > srcEnd) continue;
+			mainTrack.f0[frameOffset + i] = result.mainPitch.f0[i];
+			mainTrack.voiced[frameOffset + i] = result.mainPitch.voiced[i];
+			mainTrack.confidence[frameOffset + i] = result.mainPitch.confidence[i];
+		}
+		pitchMidi = upsample(mainTrack.f0.map(hzToMidi));
+		curveVoiced = upsampleVoiced(mainTrack.voiced);
+		pitchMidiFilled = fillGaps(pitchMidi, curveVoiced, 0, pitchMidi.length);
+		pianoroll.setTrack(mainTrack);
+		hint(`三項並行分析完成：${result.rhythm.bpm} BPM・${referenceBarStarts.length} 個小節起點`);
+		return true;
+	} catch (error) {
+		const message = `並行分析失敗：${error instanceof Error ? error.message : String(error)}`;
+		hint(message); task.finish(message, true);
+		return false;
+	}
+	finally { task.finish('參考音軌分析結束'); syncReferenceButton(); }
+}
 /** 讀檔時帶進來、但背景音檔還沒載入的設定。之後載入同名檔時套用 */
 let pendingRefSettings: BackgroundSettings | null = null;
+
+const referenceControls = new ReferenceTrackControlsView(document.getElementById('bg-bar')!, {
+	load: file => { void loadReference(file); },
+	remove: removeReference,
+	toggleMute: toggleRefMute,
+	changeGain: gainDb => {
+		ref.gainDb = gainDb;
+		applyRefToPlayer();
+	},
+	changeOffset: offsetSec => {
+		const shift = offsetSec - ref.offsetSec;
+		ref.offsetSec = offsetSec;
+		if (ref.beatAnchorSec !== null) ref.beatAnchorSec += shift;
+		referenceBeatRecords = shiftReferenceBeats(referenceBeatRecords, shift);
+		if (syncedReferenceRhythm) syncedReferenceRhythm = { ...syncedReferenceRhythm,
+			anchorSec: syncedReferenceRhythm.anchorSec + shift,
+			barStartsSec: syncedReferenceRhythm.barStartsSec.map(t => t + shift),
+			pitch: syncedReferenceRhythm.pitch?.map(point => ({ ...point, timeSec: point.timeSec + shift })),
+		};
+		rebuildReferenceBars();
+		applyRefToPlayer();
+		hint(`參考音軌 offset ${Math.round(ref.offsetSec * 1000)}ms`);
+	},
+});
 
 function applyRefToPlayer() {
 	player.setBackgroundGain(ref.muted ? 0 : Math.pow(10, ref.gainDb / 20));
@@ -1621,14 +1762,17 @@ function applyRefToPlayer() {
 }
 
 function syncRefUi() {
-	el.refName.textContent = ref.name ?? '無';
-	el.refControls.hidden = !ref.name;
-	el.refName.hidden = !ref.name;
-	el.refFileText.textContent = ref.name ? '更換' : '載入參考音軌';
-	el.refMute.classList.toggle('on', ref.muted);
-	el.refVol.value = String(ref.gainDb);
-	el.refVolOut.textContent = `${ref.gainDb > 0 ? '+' : ''}${ref.gainDb.toFixed(1)} dB`;
-	if (document.activeElement !== el.refOffset) el.refOffset.value = String(Math.round(ref.offsetSec * 1000));
+	referenceControls.render(ref);
+	syncReferenceButton();
+	anchorButton.classList.toggle('set', ref.beatAnchorSec !== null);
+}
+function syncReferenceButton() {
+	syncButton.disabled = !ref.name || !referenceCache || workState.isBusy;
+	syncButton.setAttribute('aria-pressed', String(referenceSyncEnabled));
+	syncButton.classList.toggle('on', referenceSyncEnabled);
+	tempoBpm.disabled = workState.isBusy;
+	tempoMeter.disabled = workState.isBusy;
+	syncButton.title = !ref.name || !referenceCache ? '請先載入參考音軌' : workState.isBusy ? '請等待目前工作完成' : '切換是否在 AI 檢測時一併分析參考音軌';
 }
 
 async function loadReference(file: File) {
@@ -1640,15 +1784,30 @@ async function loadReference(file: File) {
 
 		player.setBackground(audio.channels, audio.sampleRate);
 		refWave.setAudio(audio.channels, audio.sampleRate);
+		refAudio = { channels: audio.channels, sampleRate: audio.sampleRate };
+		referenceCache = createReferenceCache(audio.channels, audio.sampleRate);
+		++rhythmGeneration;
+		referenceSyncEnabled = false;
+		referenceBarStarts = [];
+		referenceBeatRecords = [];
+		lastReferenceAnalysisRange = null;
 		ref.name = audio.name;
+		ref.beatAnchorSec = null;
+		syncedReferenceRhythm = null;
 		if (pendingRefSettings && pendingRefSettings.name === audio.name) {
 			ref.gainDb = pendingRefSettings.gainDb;
 			ref.muted = pendingRefSettings.muted;
 			ref.offsetSec = pendingRefSettings.offsetSec;
+			ref.beatAnchorSec = pendingRefSettings.beatAnchorSec ?? null;
+			referenceBarStarts = pendingRefSettings.barStartsSec?.filter(Number.isFinite) ?? [];
+			referenceBeatRecords = restoreReferenceBeats(pendingRefSettings.beatRecords);
+			if (pendingRefSettings.tempoBpm) tempoBpm.value = String(pendingRefSettings.tempoBpm);
+			if (pendingRefSettings.tempoMeter) tempoMeter.value = pendingRefSettings.tempoMeter;
 			pendingRefSettings = null;
 		}
 		applyRefToPlayer();
 		progress.finish('參考音軌讀取完成');
+		rebuildReferenceBars();
 		const mainDur = outDuration();
 		hint(source && Math.abs(audio.duration - mainDur) > 0.5
 			? `參考音軌 ${fmtTime(audio.duration)} / 主唱 ${fmtTime(mainDur)}，長度不同，可能要調 offset`
@@ -1660,9 +1819,17 @@ async function loadReference(file: File) {
 }
 
 function removeReference() {
+	++rhythmGeneration;
+	referenceSyncEnabled = false;
 	player.setBackground(null);
 	refWave.setAudio(null);
+	refAudio = null;
+	referenceCache = null; referenceBarStarts = [];
+	lastReferenceAnalysisRange = null;
 	ref.name = null;
+	ref.beatAnchorSec = null;
+	syncedReferenceRhythm = null;
+	rebuildReferenceBars();
 	syncRefUi();
 	hint('已移除參考音軌');
 }
@@ -1674,27 +1841,6 @@ function toggleRefMute() {
 	hint(ref.muted ? '參考音軌靜音' : '參考音軌取消靜音');
 }
 
-el.refFile.addEventListener('change', () => {
-	const f = el.refFile.files?.[0];
-	if (f) loadReference(f);
-	el.refFile.value = '';
-});
-el.refRemove.addEventListener('click', removeReference);
-el.refMute.addEventListener('click', toggleRefMute);
-el.refVol.addEventListener('input', () => { ref.gainDb = parseFloat(el.refVol.value); applyRefToPlayer(); });
-el.refVol.addEventListener('dblclick', () => { ref.gainDb = 0; applyRefToPlayer(); });
-el.refOffset.addEventListener('change', () => {
-	ref.offsetSec = (parseFloat(el.refOffset.value) || 0) / 1000;
-	applyRefToPlayer();
-	hint(`參考音軌 offset ${Math.round(ref.offsetSec * 1000)}ms`);
-});
-document.querySelectorAll<HTMLButtonElement>('[data-bg-nudge]').forEach(btn => {
-	btn.addEventListener('click', () => {
-		ref.offsetSec = Math.round((ref.offsetSec * 1000 + parseFloat(btn.dataset.bgNudge!))) / 1000;
-		applyRefToPlayer();
-		hint(`參考音軌 offset ${Math.round(ref.offsetSec * 1000)}ms`);
-	});
-});
 syncRefUi();
 
 // ── 工具 ────────────────────────────────────────────────────────────────
@@ -1734,31 +1880,35 @@ function editedPitchRange(): { from: number; to: number } | null {
 
 // ── 畫面更新 ────────────────────────────────────────────────────────────
 
-const aiButton = document.getElementById('ai-correct') as HTMLButtonElement;
-const aiUndo = document.getElementById('ai-undo') as HTMLButtonElement;
-const aiClear = document.getElementById('ai-clear-marks') as HTMLButtonElement;
-const aiOverlay = new AIRegionOverlay(document.getElementById('pianoroll-wrap')!, async (region, enabled, offset) => {
+const aiOverlay = new AIRegionOverlay(document.getElementById('pianoroll-wrap')!, async (region, enabled, offset, formantOffset) => {
  if(!curves || !workState.canStart('render')) return;
  const task=workState.tryBegin('render','更新 AI 修正區域'); if(!task)return;
- const feedbackKey={value:el.keyFilter.value,label:el.keyFilter.selectedOptions[0]?.textContent??'全部音',capturedAt:new Date().toISOString()};
- const before=curves.clone(), next=regionCurves(curves,region,enabled,offset);
+ const feedbackKey={value:editorOptions.keyValue,label:editorOptions.keyLabel,capturedAt:new Date().toISOString()};
+ const before=curves.clone(), next=regionCurves(curves,region,enabled,offset,formantOffset);
  try {
   player.pause();
   await renderer.patch(next,toOut(Curves.frameToTime(region.from)),toOut(Curves.frameToTime(region.to)));
   history.push(before);curves=next;manualBaseline=next.clone();
   region.enabled=enabled;region.feedbackKey=feedbackKey;
-  if(enabled){region.offset=offset;region.adjusted=next.pitch.slice(region.from,region.to);region.edited=region.adjusted.some((v,i)=>Math.abs(v-region.ai[i])>1e-6);region.feedbackType=region.edited?'adjusted':undefined;}
+  if(enabled){
+   region.offset=offset;region.formantOffset=formantOffset;
+   region.adjusted=next.pitch.slice(region.from,region.to);region.adjustedFormant=next.formant.slice(region.from,region.to);
+   region.edited=region.adjusted.some((v,i)=>Math.abs(v-region.ai[i])>1e-6)||region.adjustedFormant.some((v,i)=>Math.abs(v-region.aiFormant[i])>1e-6);
+   region.feedbackType=region.edited?'adjusted':undefined;
+  }
   else{resetAIRegionToAI(region);region.feedbackType='rejected';}
   selBase=selection?curves.clone():null;sessionPushed=false;resetParams();
   player.setAudio(renderer.rendered,renderer.sampleRate);
   task.finish('AI 區域已更新');
- } catch(error){task.finish(String(error),true);aiStatus.textContent=String(error);}
+ } catch(error){task.finish(String(error),true);aiToolbar.setStatus(String(error));}
  finally{aiPreviewCurves=null;task.finish('AI 區域更新結束');}
-},(region,enabled,offset)=>{
+},(region,enabled,offset,formantOffset)=>{
  if(!region||!curves){aiPreviewCurves=null;return;}
- aiPreviewCurves=regionCurves(curves,region,enabled??region.enabled,offset??region.offset);
+ aiPreviewCurves=regionCurves(curves,region,enabled??region.enabled,offset??region.offset,formantOffset??region.formantOffset);
 });
-aiClear.addEventListener('click',async()=>{
+// 黃框位於 canvas 上方，是 canvas 的兄弟節點；事件不會冒泡到 canvas，必須綁定同一套縮放手勢。
+bindZoomGesture(aiOverlay.gestureTarget, zoomTimelineAtPointer, () => source !== null);
+async function completeAIReview() {
  if(!curves || !aiReview || !trainingAsset || workState.isBusy)return;
  const task=workState.tryBegin('render','整理 AI 修正回饋');if(!task)return;
  try {
@@ -1796,30 +1946,26 @@ aiClear.addEventListener('click',async()=>{
   task.finish('AI 修正標示已取消，聲音保留目前狀態');
  }catch(error){task.finish(String(error),true);trainingStatus.textContent=`回饋保存失敗，黃框保留供重試：${String(error)}`;}
  finally{task.finish('AI 回饋工作結束');}
-});
+}
 
-const aiCancel = document.getElementById('ai-cancel') as HTMLButtonElement;
-const aiLevel = document.getElementById('ai-strength') as HTMLInputElement;
-const aiStatus = document.getElementById('ai-status')!;
-const aiSettingsButton = document.getElementById('ai-settings-open') as HTMLButtonElement;
 const aiSettings = new AISettingsView(document.getElementById('ai-settings-dialog') as HTMLDialogElement, () => {
-	document.getElementById('ai-service')!.textContent = aiSettings.label;
-		aiStatus.textContent = aiSettings.ready ? '設定已套用；調整程度後按 AI 修正' : aiSettings.label;
+	aiToolbar.setService(aiSettings.label);
+		aiToolbar.setStatus(aiSettings.ready ? '設定已套用；調整程度後按 AI 修正' : aiSettings.label);
 		updateAIStrengthText();
 		syncAIControls();
 });
-document.getElementById('ai-service')!.textContent = aiSettings.label;
+aiToolbar.setService(aiSettings.label);
 void (async () => {
 	aiSettings.setBuiltinAIState(false, '正在檢查本機訓練資料');
 	try {
 		const result = await updateBuiltinAIModel();
 		const counts = result.model.counts;
 		aiSettings.setBuiltinAIState(true, `${counts.used} 筆可用${result.updated ? '，模型已更新' : '，模型為最新'}`);
-		if (aiSettings.settings.provider === 'builtin-ai') aiStatus.textContent = `內建 AI 已就緒：手動 ${counts.manual}、拒絕 ${counts.rejected}、再次調整 ${counts.adjusted}，實際採用 ${counts.used} 筆`;
+		if (aiSettings.settings.provider === 'builtin-ai') aiToolbar.setStatus(`內建 AI 已就緒：手動 ${counts.manual}、拒絕 ${counts.rejected}、再次調整 ${counts.adjusted}，實際採用 ${counts.used} 筆`);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		aiSettings.setBuiltinAIState(false, `無法使用：${message}`);
-		if (aiSettings.settings.provider === 'builtin-ai') aiStatus.textContent = `內建 AI 無法使用：${message}`;
+		if (aiSettings.settings.provider === 'builtin-ai') aiToolbar.setStatus(`內建 AI 無法使用：${message}`);
 	}
 })();
 const aiFlow = new AICorrectionFlow({
@@ -1839,25 +1985,19 @@ const aiFlow = new AICorrectionFlow({
 	scheduleBackground: range => scheduleBackground({ from: range.start, to: range.end }),
 	collectNotes: collectCorrectionNotesParallel,
 });
-aiSettingsButton.addEventListener('click', () => aiSettings.open());
 function updateAIStrengthText() {
-	const level = Number(aiLevel.value), output = document.getElementById('ai-strength-value')!;
+	const level = aiToolbar.level;
 	if (aiSettings.settings.provider === 'rules') {
-		const cents = (11 - level) * 5;
-		output.textContent = `${level} / 10 · ≥${cents}¢`;
-		aiLevel.title = `傳統模式第 ${level} 級：偏差至少 ${cents} cents 才修正；入選後完整移向目標音高。`;
-		aiLevel.setAttribute('aria-valuetext', `${level} 級，修正偏差至少 ${cents} cents 的音符`);
+		const milliseconds = ruleMinimumDurationMs(level);
+		aiToolbar.setStrengthDisplay({ text: `${level} / 10 · ≥${milliseconds}ms`, title: `傳統模式第 ${level} 級：同方向偏離至少持續 ${milliseconds} ms 才修正（固定容許帶 5 cents）；入選後完整修正中心。`, ariaValueText: `${level} 級，修正連續偏離至少 ${milliseconds} 毫秒的區段` });
 	} else {
-		output.textContent = `${level} / 10 · ${level * 10}%`;
-		aiLevel.title = `AI 模式第 ${level} 級：將模型選中的音符中心向目標修正 ${level * 10}%。`;
-		aiLevel.setAttribute('aria-valuetext', `${level} 級，修正音符中心偏差的 ${level * 10}%`);
+		aiToolbar.setStrengthDisplay({ text: `${level} / 10 · ${level * 10}%`, title: `AI 模式第 ${level} 級：將模型選中的音符中心向目標修正 ${level * 10}%。`, ariaValueText: `${level} 級，修正音符中心偏差的 ${level * 10}%` });
 	}
 }
-aiLevel.addEventListener('input', updateAIStrengthText);
 updateAIStrengthText();
-aiUndo.addEventListener('click', async () => {
+async function discardAICorrection() {
 	if (!curves || !aiReview || workState.isBusy) return;
-	const task=workState.tryBegin('render','取消 AI 修改');if(!task)return;
+	const task=workState.tryBegin('render','放棄 AI 修改');if(!task)return;
 	const target=aiReview.input.curves.clone();
 	try {
 		player.pause();syncPlayButton();
@@ -1866,46 +2006,59 @@ aiUndo.addEventListener('click', async () => {
 		curves=target;manualBaseline=target.clone();history.truncate(aiReview.historyDepth);
 		aiRegions=[];aiReview=null;aiOverlay.clear();clearSelection();selectedAnchors.clear();
 		player.setAudio(renderer.rendered,renderer.sampleRate);resetParams();syncToolbar();
-		aiStatus.textContent='已取消 AI 修改，整個音頻已回復到 AI 調音前';
-		hint('已取消 AI 修改，整個音頻已回復到 AI 調音前');
+		aiToolbar.setStatus('已放棄 AI 修改，整個音頻已回復到 AI 調音前');
+		hint('已放棄 AI 修改，整個音頻已回復到 AI 調音前');
 		task.finish('AI 修改已取消');
-	}catch(error){const message=`取消 AI 修改失敗：${error instanceof Error?error.message:String(error)}`;aiStatus.textContent=message;task.finish(message,true);}
-	finally{task.finish('取消 AI 修改工作結束');syncAIControls();}
-});
-aiCancel.addEventListener('click', () => { if (aiFlow.cancel()) aiCancel.disabled = true; });
+	}catch(error){const message=`放棄 AI 修改失敗：${error instanceof Error?error.message:String(error)}`;aiToolbar.setStatus(message);task.finish(message,true);}
+	finally{task.finish('放棄 AI 修改工作結束');syncAIControls();}
+}
+function cancelAICorrection() { if (aiFlow.cancel()) aiToolbar.setCancelDisabled(true); }
 
 function syncAIControls() {
+	syncReferenceButton();
 	const locked = workState.isBusy;
 	const range = detectionBar.range;
-	aiClear.disabled = locked || !aiRegions.length;
-	aiButton.disabled = !!aiRegions.length || locked || !aiReady || !aiSettings.ready || !curves || !pitchMidi || !curveVoiced || !el.keyFilter.value || !range || range.end <= range.start;
-	aiButton.title = aiRegions.length ? '請先取消目前 AI 修正標示，再執行下一次 AI 修正' : !el.keyFilter.value ? '請先選擇 Key（不能是全部音）' : !range || range.end <= range.start ? '請先在檢測列標示範圍' : '只修正檢測範圍；修正後可逐框審核或取消整次 AI 修改';
-	aiUndo.disabled = locked || !aiReady || !aiReview || !aiRegions.length;
-	aiUndo.title = aiRegions.length ? '放棄本次 AI 修音及黃框內人工調整，回復 AI 執行前的完整音頻' : '目前沒有可取消的 AI 修改';
-	el.toolSelect.disabled=el.toolPen.disabled=!!aiRegions.length||locked;
-	aiSettingsButton.disabled = aiLevel.disabled = locked;
+	const correctDisabled = !!aiRegions.length || locked || !aiReady || !aiSettings.ready || !curves || !pitchMidi || !curveVoiced || !editorOptions.keyValue || !range || range.end <= range.start;
+	aiToolbar.setControls({
+		disabled: locked,
+		correct: correctDisabled,
+		correctTitle: aiRegions.length ? '請先取消目前 AI 修正標示，再執行下一次 AI 修正' : !editorOptions.keyValue ? '請先選擇 Key（不能是全部音）' : !range || range.end <= range.start ? '請先在檢測列標示範圍' : '只修正檢測範圍；修正後可逐框審核或取消整次 AI 修改',
+		discard: locked || !aiReady || !aiReview || !aiRegions.length,
+		discardTitle: aiRegions.length ? '放棄本次 AI 修音及黃框內人工調整，回復 AI 執行前的完整音頻' : '目前沒有可取消的 AI 修改',
+		complete: locked || !aiRegions.length,
+	});
+	toolLaneControls.setDisabled(!!aiRegions.length || locked);
 	syncToolbar();
 }
 
-aiButton.addEventListener('click', async () => {
-	if (aiButton.disabled || !source || !curves || !pitchMidi || !curveVoiced || drag || aiFlow.running) return;
-	const key = KEY_OPTIONS.find(k => k.id === el.keyFilter.value);
+async function startAICorrection() {
+	if (!source || !curves || !pitchMidi || !curveVoiced || drag || aiFlow.running) return;
+	const key = KEY_OPTIONS.find(k => k.id === editorOptions.keyValue);
 	const range = detectionBar.range;
 	if (!key || !range || range.end <= range.start) return;
+	if (referenceSyncEnabled && !await analyzeSynchronizedTracks()) return;
 	const sourceStart = curves.timeMap.outToSrc(range.start);
 	const sourceEnd = curves.timeMap.outToSrc(range.end);
-	const segments = planAudioSegments(source.channels, source.sampleRate, { start: sourceStart, end: sourceEnd })
+	const segments = planBalancedAudioSegments(source.channels, source.sampleRate, {
+		start: sourceStart, end: sourceEnd, segmentCount: availableParallelWorkers('cpu'),
+	})
 		.map(segment => ({ start: curves!.timeMap.srcToOut(segment.start), end: curves!.timeMap.srcToOut(segment.end) }));
 	const historyDepthBeforeAI=history.depth;
 	const outcome = await aiFlow.run({
 		curves, midi: pitchMidi, voiced: curveVoiced, key, range, segments,
-		level: Number(aiLevel.value), settings: aiSettings.settings,
+		level: aiToolbar.level, settings: aiSettings.settings, formantFollow: renderer.formantFollow,
+		referenceRhythm: referenceSyncEnabled && syncedReferenceRhythm ? { ...syncedReferenceRhythm,
+			barStartsSec: syncedReferenceRhythm.barStartsSec.filter(t => t >= range.start && t <= range.end),
+			pitch: syncedReferenceRhythm.pitch?.filter(p => p.timeSec >= range.start && p.timeSec <= range.end),
+		} : undefined,
 	}, update => {
-		aiStatus.textContent = update.message;
-		aiCancel.disabled = !update.cancellable;
+		aiToolbar.setStatus(update.message);
+		aiToolbar.setCancelDisabled(!update.cancellable);
 	});
 	switch (outcome.status) {
 		case 'completed': {
+			commitReferenceBeatRecords();
+			referenceBeatsCommitted = referenceSyncEnabled && syncedReferenceRhythm !== null && referenceBarStarts.length > 0;
 			const { settings, key, level, range } = outcome.input;
 			// AICorrectionFlow has committed the corrected curves by this point. Keep the
 			// pre/post curve pair and the rendered AI audio so every returned region can
@@ -1928,62 +2081,68 @@ aiButton.addEventListener('click', async () => {
 			}
 			aiReview = { curves: curves!.clone(), input: outcome.input, audio: reviewAudio, keyLabel: key.label, historyDepth: historyDepthBeforeAI };
 			clearSelection();setTool('select');
-			aiStatus.textContent = `${settings.provider === 'rules' ? '傳統內建修正' : settings.provider === 'builtin-ai' ? '內建 AI 修正' : '外部 AI 修正'}完成：${outcome.count} 個音符 · ${aiRegions.length} 個黃框 · ${outcome.segmentCount} 個低音壓分段 · ${key.label} · ${level}/10 · ${fmtTime(range.start)}～${fmtTime(range.end)}`;
+			aiToolbar.setStatus(`${settings.provider === 'rules' ? '傳統內建修正' : settings.provider === 'builtin-ai' ? '內建 AI 修正' : '外部 AI 修正'}完成：${outcome.count} 個音符 · ${aiRegions.length} 個黃框 · ${outcome.segmentCount} 個低音壓分段 · ${key.label} · ${level}/10 · ${fmtTime(range.start)}～${fmtTime(range.end)}`);
 			break;
 		}
 		case 'unchanged':
-			aiStatus.textContent = '沒有需要修正的穩定音符；不確定的音符保留原樣';
+			commitReferenceBeatRecords();
+			referenceBeatsCommitted = referenceSyncEnabled && syncedReferenceRhythm !== null && referenceBarStarts.length > 0;
+			aiToolbar.setStatus('沒有需要修正的穩定音符；不確定的音符保留原樣');
 			break;
 		case 'cancelled':
 		case 'failed':
-			aiStatus.textContent = outcome.message;
+			aiToolbar.setStatus(outcome.message);
 			break;
 		case 'busy': break;
 	}
 	syncAIControls();
-});
+	}
+
+function commitReferenceBeatRecords() {
+	if (!referenceSyncEnabled || !syncedReferenceRhythm || !lastReferenceAnalysisRange) return;
+	referenceBeatRecords = mergeReferenceBeats(referenceBeatRecords, syncedReferenceRhythm.barStartsSec,
+		syncedReferenceRhythm.bpm, syncedReferenceRhythm.meter, lastReferenceAnalysisRange);
+	document.getElementById('ref-beat-status')!.textContent = `已記錄 ${referenceBeatRecords.length} 拍 · 本次 ${referenceBarStarts.length} 個小節起點`;
+}
 
 workState.subscribe(state => {
 	progressView.render(state.progress);
 	computeControl.sync();
 	const ai = workState.has('ai');
-	aiButton.setAttribute('aria-busy', String(ai));
-	aiCancel.hidden = !ai;
-	if (!ai) aiCancel.disabled = true;
+	aiToolbar.setBusy(ai);
 	// Keep playback available during ordinary rendering; all editing follows one policy.
-	el.stage.inert = el.globalBar.inert = el.panel.inert = state.blocksEditing;
-	document.querySelector('header')!.inert = ai;
-	el.openAudio.disabled = !workState.canStart('load');
-	el.file.disabled = !workState.canStart('load');
-	el.openProject.disabled = !workState.canStart('project');
-	el.refFile.disabled = !workState.canStart('reference');
-	el.exportBtn.disabled = !source || !curves || !workState.canStart('export');
-	el.saveBtn.disabled = !source || !curves || state.blocksEditing;
+	el.stage.inert = state.blocksEditing;
+	globalControls.setInert(state.blocksEditing);
+	inspector.setInert(state.blocksEditing);
+	headerPanel.setInert(ai);
+	headerPanel.setActions({
+		canOpenAudio: workState.canStart('load'),
+		canOpenProject: workState.canStart('project'),
+		canExport: !!source && !!curves && workState.canStart('export'),
+		canSave: !!source && !!curves && !state.blocksEditing,
+	});
+	referenceControls.setDisabled(!workState.canStart('reference'));
 	syncAIControls();
 });
 
-function frame() {
-	computeControl.sync();
-	syncAIControls();
-	if (source) {
-		const pos = player.position;
-		el.clock.textContent = fmtTime(pos);
-		applyFollow(pos);
-		autoScrollAnchorDrag();
-		player.tick();
-		const loop = player.loopRegion;
-		waveform.draw(pos, selection, curves, loop, renderingRange, selectedAnchors);
-		refWave.draw(pos, selection, loop);
-		const displayCurves=aiPreviewCurves??curves;
-		pianoroll.draw(pos, selection, displayCurves, loop, renderingRange, selectedAnchors);
-	   if(displayCurves&&pitchMidi)aiOverlay.draw(aiRegions,displayCurves,pitchMidi,t=>view.timeToX(t),pianoroll.rangeOf('pitch'),el.pianoroll.clientHeight,workState.isBusy);
-		detectionBar.sync();
-		hbar.sync();
-		vbar.sync();
-	}
-	requestAnimationFrame(frame);
-}
-frame();
+const displayCoordinator = new DisplayCoordinator({
+ readState: () => ({
+  loaded: !!source, selection, curves, previewCurves: aiPreviewCurves, renderingRange,
+  selectedAnchors, aiRegions, pitchMidi, beatAnchor: ref.beatAnchorSec,
+  barStarts: referenceBarStarts, bpm: Number(tempoBpm.value), meter: tempoMeter.value,
+  analyzedBeats: referenceBeatsCommitted, beatRecords: ref.name ? referenceBeatRecords : [], locked: workState.isBusy,
+ }),
+ playback: player, waveform, referenceWaveform: refWave, pianoroll, aiOverlay,
+ timeToX: time => view.timeToX(time),
+ pitchHeight: () => el.pianoroll.clientHeight,
+ setPosition: position => transport.setPosition(fmtTime(position)),
+ followPosition: applyFollow,
+ autoScrollDrag: autoScrollAnchorDrag,
+ syncControls: () => { computeControl.sync(); syncAIControls(); },
+ syncNavigation: () => { detectionBar.sync(); hbar.sync(); vbar.sync(); },
+});
+displayCoordinator.start();
+import.meta.hot?.dispose(() => displayCoordinator.stop());
 
 // Test hooks and URL fixtures are deliberately excluded from production builds.
 if (import.meta.env.DEV) {
@@ -1999,7 +2158,14 @@ if (import.meta.env.DEV) {
    get selectedAnchors() { return selectedAnchors; },
 
    get backgroundWaiting() { return !!bgTimer || !!bgPendingRange; },
-   view, player, renderer, history, pianoroll, waveform, refWave, ref, el,
+	   view, player, renderer, history, pianoroll, waveform, refWave, ref, el: {
+		...el,
+		vibOn: document.getElementById('vib-on') as HTMLInputElement,
+		vibDepth: document.getElementById('vib-depth') as HTMLInputElement,
+		vibOnsetOn: document.getElementById('vib-onset-on') as HTMLInputElement,
+		vibOnset: document.getElementById('vib-onset') as HTMLInputElement,
+		bgStatus: document.getElementById('bg-status')!,
+	},
    toSrc, toOut, outDuration, waitBackground, rerender, remapSelection, applyTimeMap, load, status,
   }, window, location.search);
   import.meta.hot?.dispose(() => diagnostics?.dispose());

@@ -5,6 +5,7 @@
 // session 檔才是原始檔，算繪結果隨時可以重新產生。
 import { Curves, CURVE_HOP_SEC, CURVE_SUB, upsample, type LaneId } from './curves';
 import { TimeMap } from './timemap';
+import type { ReferenceBeatRecord } from './reference-beat-table';
 
 const FORMAT = 'wipitch-project';
 const VERSION = 5;
@@ -42,6 +43,11 @@ export interface BackgroundSettings {
 	gainDb: number;
 	muted: boolean;
 	offsetSec: number;
+	beatAnchorSec?: number | null;
+	tempoBpm?: number;
+	tempoMeter?: string;
+	barStartsSec?: number[];
+	beatRecords?: ReferenceBeatRecord[];
 }
 
 export function serialize(

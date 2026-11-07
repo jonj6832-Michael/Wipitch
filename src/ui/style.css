@@ -39,6 +39,12 @@ body { display: flex; flex-direction: column; }
 #ai-strength { width: 110px; accent-color: var(--accent); }
 #ai-strength-value { min-width: 42px; font-variant-numeric: tabular-nums; }
 #ai-correct { border-color: var(--accent-dim); }
+.tempo-field { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.tempo-field select, .tempo-field input { color: var(--text); background: #252b34; border: 1px solid #485362; border-radius: 4px; padding: 3px 4px; font: inherit; }
+#tempo-bpm { width: 58px; }
+#sync-reference { border-color: #a78930; }
+#sync-reference.on { color: #ffd54a; background: #453b21; }
+#ref-beat-status { color: #ffd54a; white-space: nowrap; }
 #ai-correct[aria-busy="true"] { border-color: var(--accent); background: #224858; opacity: 1; animation: activity-blink 1.2s ease-in-out infinite; }
 #ai-status { color: var(--dim); flex: 1; min-width: 160px; }
 #ai-settings-dialog { color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; width: min(540px, 94vw); max-height: 90vh; overflow: auto; padding: 24px; }
@@ -60,16 +66,22 @@ header {
 	flex: 0 0 auto;
 }
 
-h1 {
+#build-version {
+	display: block;
+	flex: 0 0 190px;
+	min-width: 190px;
 	font-size: 15px;
-	margin: 0;
-	letter-spacing: 0.5px;
+	font-variant-numeric: tabular-nums;
 	color: var(--accent);
 	white-space: nowrap;
+	overflow: visible;
 }
-h1 a { color: inherit; text-decoration: none; }
-h1 a:hover .by { color: var(--text); }
-h1 .by { font-size: 11px; font-weight: normal; color: var(--dim); letter-spacing: 0; }
+
+/* 工作區選擇器是頂端面板的一部分；真正的顯示切換由 workspace-layout.ts
+   在 body 上標示 data-workspace 後交給以下 CSS 處理。 */
+#workspace-selector { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; color: var(--dim); white-space: nowrap; }
+#workspace-layout { color-scheme: dark; color: var(--text); background: #252b34; border: 1px solid #485362; border-radius: 4px; padding: 4px 6px; font: inherit; }
+#workspace-layout:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* 播放區只放圖示，文字說明在 tooltip */
 button.icon { min-width: 34px; padding: 5px 8px; text-align: center; }
@@ -130,6 +142,8 @@ main { flex: 1; display: grid; grid-template-rows: 1fr 18px 6px var(--wave-h, 15
 #bg-vol { width: 80px; }
 #bg-offset { width: 60px; }
 #bg-mute.on { border-color: #ff6b6b; color: #ff6b6b; }
+#ref-anchor-set.active, #ref-anchor-set.set { border-color: #ffd54a; color: #ffd54a; }
+#ref-average-bpm { color: #ffd54a; font-variant-numeric: tabular-nums; white-space: nowrap; margin-left: 6px; }
 
 /* 波形放大：跟 automation 區的縱向縮放滑桿同一個樣子 */
 #amp-zoom, #ref-amp-zoom {
@@ -249,7 +263,7 @@ body.dragging #drop-hint { display: grid; }
 	gap: 12px;
 	align-items: center;
 	flex: 0 0 auto;   /* 右邊這組不縮也不折，空間不夠時讓左邊的面板折行 */
-	margin-left: auto;   /* 左半邊沒有東西時仍靠右 */
+	margin-left: 0;
 }
 
 #lane-bar .tools, #lane-bar .lane-chips { display: flex; gap: 4px; align-items: center; }
@@ -309,6 +323,43 @@ body.dragging #drop-hint { display: grid; }
 }
 #help-link:hover { border-color: var(--accent); color: var(--accent); }
 
+/* ── 可選工作區 ────────────────────────────────────────────────────────
+ * 完整工作站是預設：顯示所有模組。
+ * 專注編輯保留音高、檢測、AI 與輸出相關操作，把可在其他工作區使用的輔助
+ * 模組收起，讓中央畫布取得更多高度。
+ * 高可讀性只調整視覺密度與可辨識性，不會隱藏任何功能。
+ */
+body[data-workspace="focus"] header { gap: 8px; padding-block: 7px; }
+body[data-workspace="focus"] #training-library-open,
+body[data-workspace="focus"] header .modes,
+body[data-workspace="focus"] #bg-status,
+body[data-workspace="focus"] #hint,
+body[data-workspace="focus"] #help-link,
+body[data-workspace="focus"] .detection-legend,
+body[data-workspace="focus"] #load-timings { display: none; }
+body[data-workspace="focus"] main { grid-template-rows: 1fr 18px 6px clamp(72px, 16vh, 120px) 0 0; }
+body[data-workspace="focus"] #ref-splitter,
+body[data-workspace="focus"] #ref-track { display: none; }
+body[data-workspace="focus"] #global-bar .explain { display: none; }
+
+body[data-workspace="readable"] {
+	--piano-key-width: 92px;
+	font-size: 15px;
+}
+body[data-workspace="readable"] header { gap: 14px; padding-block: 12px; }
+body[data-workspace="readable"] #ai-toolbar,
+body[data-workspace="readable"] #pitch-toolbar,
+body[data-workspace="readable"] #global-bar,
+body[data-workspace="readable"] #progress { font-size: 14px; }
+body[data-workspace="readable"] button,
+body[data-workspace="readable"] .file,
+body[data-workspace="readable"] #key-filter,
+body[data-workspace="readable"] #workspace-layout { font-size: 14px; }
+body[data-workspace="readable"] #ai-toolbar button,
+body[data-workspace="readable"] #global-bar button { padding: 6px 12px; }
+body[data-workspace="readable"] #piano-keys span { font-size: 12px; }
+body[data-workspace="readable"] .detection-legend { font-size: 12px; }
+
 /* 算繪進度條。長段落的畫筆與讀檔整段重算都要好幾秒。 */
 /* 背景精算的指示燈。刻意做得不搶眼——它不需要使用者做任何事 */
 #bg-status { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 12px; white-space: nowrap; }
@@ -325,6 +376,8 @@ body.dragging #drop-hint { display: grid; }
 #compute-mode { color-scheme: dark; color: var(--text); background: #252b34; border: 1px solid #485362; border-radius: 4px; padding: 3px; font: inherit; }
 #compute-mode:disabled { opacity: .55; cursor: wait; }
 #compute-status { color: var(--dim); font-size: 11px; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#compute-benchmark-status { color: var(--dim); font-size: 11px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#compute-benchmark-status:hover { overflow: visible; }
 @media (max-width: 850px) {
 	#progress { flex-wrap: wrap; gap: 6px 10px; }
 	#compute-control { flex-basis: 100%; border-right: 0; }
@@ -421,3 +474,18 @@ body.dragging #drop-hint { display: grid; }
 .ai-region.human-edited input[type=checkbox] { accent-color:#ed5353;outline:1px solid #ed5353; }
 .ai-region-edited-mark { display:none;color:#ff5252;font-size:14px;margin-left:4px; }
 .ai-region.human-edited .ai-region-edited-mark { display:inline; }
+.ai-region-formant { position:absolute;left:5px;right:5px;bottom:5px;height:24px;display:grid;grid-template-columns:14px minmax(28px,1fr) 34px;align-items:center;gap:3px;padding:1px 4px;box-sizing:border-box;border:2px solid #64df86;border-radius:3px;background:#15251bcc;color:#8df0a7;font-size:10px;cursor:ew-resize;pointer-events:auto; }
+.ai-region-formant input { width:100%;min-width:0;margin:0;accent-color:#64df86;cursor:ew-resize; }
+.ai-region-formant output { text-align:right;font-variant-numeric:tabular-nums; }
+
+/* 觸控編輯時由 Pointer Events 接管手勢，避免瀏覽器捲動中斷拖曳。 */
+.track canvas, #pianoroll-wrap canvas { touch-action: none; }
+@media (max-width: 900px) {
+ html, body { height: 100dvh; }
+ header { flex-wrap: wrap; gap: 6px; padding: 6px; max-height: 28dvh; overflow: auto; }
+ #build-version { flex-basis: auto; min-width: 0; font-size: 12px; }
+ #ai-toolbar, #pitch-toolbar, #global-bar { padding-inline: 6px; max-height: 22dvh; overflow: auto; }
+ #global-bar { flex-wrap: wrap; }
+ button, select, input[type="file"] { min-height: 36px; }
+ main { min-height: 120px; }
+}

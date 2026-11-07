@@ -4,10 +4,10 @@ import { pitchDeviation } from '../src/model/pitch-deviation.ts';
 
 const cMajor = KEY_OPTIONS.find(key => key.id === 'major-0');
 const gMajor = KEY_OPTIONS.find(key => key.id === 'major-7');
-assert.equal(pitchDeviation(60.49, cMajor).direction, 'near');
-assert.equal(pitchDeviation(60.5, cMajor).direction, 'sharp');
-assert.equal(pitchDeviation(61.5, cMajor).direction, 'flat');
-assert.equal(pitchDeviation(61.51, cMajor).direction, 'near');
+assert.equal(pitchDeviation(60.249, cMajor).direction, 'near');
+assert.equal(pitchDeviation(60.25, cMajor).direction, 'sharp');
+assert.equal(pitchDeviation(61.75, cMajor).direction, 'flat');
+assert.equal(pitchDeviation(61.751, cMajor).direction, 'near');
 assert.equal(pitchDeviation(61, cMajor).targetMidi, 60); // 等距固定取較低音
 assert.equal(pitchDeviation(66, gMajor).direction, 'near');
 assert.equal(pitchDeviation(66, cMajor).direction, 'sharp');
@@ -21,4 +21,4 @@ for (const key of KEY_OPTIONS) {
 		}
 	}
 }
-console.log('PASS: ±50 cent thresholds, nearest scale note, ties, key changes, all 24 keys across octaves');
+console.log('PASS: ±25 cent thresholds, nearest scale note, ties, key changes, all 24 keys across octaves');

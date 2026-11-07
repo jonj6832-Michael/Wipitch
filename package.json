@@ -42,14 +42,18 @@
 		"check": "tsc --noEmit",
 		"verify:core": "node tools/core-verify.mjs",
 		"verify": "node tools/verify.mjs && node tools/ui-verify.mjs && npm run verify:flatten && npm run verify:formant && npm run verify:slope && npm run verify:stretch",
-		"verify:stretch": "node --experimental-strip-types --import ./tools/ts-resolve.mjs spike/timemap-test.mjs && node --experimental-strip-types --import ./tools/ts-resolve.mjs spike/stretch-truth.mjs && node --experimental-strip-types --import ./tools/ts-resolve.mjs spike/stretch-vibrato.mjs",
-		"spike": "node --experimental-strip-types spike/final-compare.mjs",
-		"verify:flatten": "node --experimental-strip-types --import ./tools/ts-resolve.mjs spike/flatten-truth.mjs",
+		"verify:stretch": "node --experimental-transform-types --import ./tools/ts-resolve.mjs spike/timemap-test.mjs && node --experimental-transform-types --import ./tools/ts-resolve.mjs spike/stretch-truth.mjs && node --experimental-transform-types --import ./tools/ts-resolve.mjs spike/stretch-vibrato.mjs",
+		"spike": "node --experimental-transform-types --import ./tools/ts-resolve.mjs spike/final-compare.mjs",
+		"verify:flatten": "node --experimental-transform-types --import ./tools/ts-resolve.mjs spike/flatten-truth.mjs",
 		"verify:ui": "node tools/ui-verify.mjs",
-		"spike:formant": "node --experimental-strip-types --import ./tools/ts-resolve.mjs spike/formant-lag.mjs",
-		"verify:formant": "node --experimental-strip-types --import ./tools/ts-resolve.mjs spike/formant-truth.mjs",
-		"verify:slope": "node --experimental-strip-types --import ./tools/ts-resolve.mjs spike/slope-limit-test.mjs && node --experimental-strip-types --import ./tools/ts-resolve.mjs spike/gain-lag.mjs"
+		"spike:formant": "node --experimental-transform-types --import ./tools/ts-resolve.mjs spike/formant-lag.mjs",
+		"verify:formant": "node --experimental-transform-types --import ./tools/ts-resolve.mjs spike/formant-truth.mjs",
+		"verify:slope": "node --experimental-transform-types --import ./tools/ts-resolve.mjs spike/slope-limit-test.mjs && node --experimental-transform-types --import ./tools/ts-resolve.mjs spike/gain-lag.mjs",
+		"dev:local": "vite --host 127.0.0.1 --port 5180 --strictPort"
 	},
 	"license": "GPL-3.0",
-	"description": "瀏覽器裡的單音修音工具（Flex Pitch / Melodyne 單音模式的替代品）"
+	"description": "瀏覽器裡的單音修音工具（Flex Pitch / Melodyne 單音模式的替代品）",
+	"engines": {
+		"node": ">=22.13.0 <23"
+	}
 }

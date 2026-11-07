@@ -29,6 +29,13 @@ assert.deepEqual(reviewedAIRegions([inferred]),[],'curve state alone must not cr
 assert.deepEqual(reviewedAIRegions([{...inferred,feedbackType:'rejected'},{...inferred,feedbackType:'adjusted'}]).map(x=>x.feedbackType),['rejected','adjusted']);
 const history=new History();history.reset(base);history.push(base);history.push(after);history.truncate(0);
 assert.equal(history.depth,0);assert.equal(history.redoDepth,0);
+// Formant-follow 模式下，AI 以反向共振峰位移抵銷這次音高修正；voice 模式（0）不重複補償。
+const formantBase=new Curves(1000),formantAfter=applyCorrection(formantBase,notes,notes.map(n=>({id:n.id,targetMidi:n.defaultTarget})),key,10,voiced,'strength',1).curves;
+for(let i=0;i<formantAfter.length;i++)assert.ok(Math.abs(formantAfter.formant[i]+formantAfter.pitch[i])<1e-6);
+const formantRegion=createAIRegions(formantBase,formantAfter,notes)[0];
+const formantManual=regionCurves(formantAfter,formantRegion,true,0,1.25);
+assert.ok(formantManual.formant.some((v,i)=>Math.abs(v-formantAfter.formant[i])>.1));
+assert.deepEqual(regionCurves(formantManual,formantRegion,false).formant,formantBase.formant);
 // Local long-note drift, stable on each side.
 midi.fill(60);voiced.fill(1);midi.fill(60.35,400,470);
 const drift=contextCorrectionNotes(base,midi,voiced,key,{start:0,end:2});

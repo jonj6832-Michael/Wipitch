@@ -8,7 +8,7 @@ interface PickedAudio {
 let tokenPromise: Promise<string> | null = null;
 async function localToken(): Promise<string> {
 	tokenPromise ??= fetch('/__training/config').then(async response => {
-		if (!response.ok) throw new Error('請使用「啟動WiPitch.command」啟動程式');
+		if (!response.ok) throw new Error('請以 npm run dev:local 啟動本機服務；行動裝置請使用一般檔案選擇');
 		return String((await response.json()).token);
 	});
 	return tokenPromise;
@@ -37,7 +37,7 @@ export async function readLocalAudio(audioPath: string, known?: PickedAudio): Pr
 		const data = await response.json().catch(() => ({}));
 		throw new Error(data.error || '無法讀取專案記錄的原始音訊');
 	}
-	const name = decodeURIComponent(response.headers.get('X-Audio-Name') || '') || known?.name || audioPath.split('/').pop() || 'audio';
+	const name = decodeURIComponent(response.headers.get('X-Audio-Name') || '') || known?.name || audioPath.split(/[\\/]/).pop() || 'audio';
 	const lastModified = Number(response.headers.get('X-Audio-Last-Modified')) || known?.lastModified || Date.now();
 	return new File([await response.blob()], name, { type: response.headers.get('Content-Type') || 'application/octet-stream', lastModified });
 }

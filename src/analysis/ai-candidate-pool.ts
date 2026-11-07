@@ -1,6 +1,7 @@
 import CandidateWorker from './ai-candidate.worker?worker';
 import type { CorrectionInput } from '../application/ai-correction-flow';
 import type { CorrectionNote } from '../model/auto-pitch';
+import { availableParallelWorkers } from './audio-segments';
 
 export type OutputRange = { start: number; end: number };
 
@@ -8,8 +9,7 @@ export type OutputRange = { start: number; end: number };
 export async function collectCorrectionNotesParallel(input: CorrectionInput, ranges: OutputRange[],
 	signal: AbortSignal, progress: (done: number, total: number) => void): Promise<CorrectionNote[]> {
 	if (!ranges.length) return [];
-	const hardware = typeof navigator === 'undefined' ? 2 : navigator.hardwareConcurrency || 2;
-	const count = Math.min(ranges.length, Math.max(1, Math.min(4, hardware - 1 || 1)));
+	const count = Math.min(ranges.length, availableParallelWorkers('cpu'));
 	const workers = Array.from({ length: count }, () => new CandidateWorker());
 	const stop = () => workers.forEach(worker => worker.terminate());
 	if (signal.aborted) { stop(); throw new Error('AI 修正已取消，未套用變更'); }

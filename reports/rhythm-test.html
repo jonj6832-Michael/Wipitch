@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-Hant">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WiPitch 純節拍實音測試</title>
+<style>
+body{font:15px system-ui,sans-serif;background:#101318;color:#e8edf2;margin:24px}h1{font-size:22px}label{display:inline-flex;gap:6px;align-items:center;margin:8px 12px 8px 0}input,button{padding:7px;background:#202630;color:inherit;border:1px solid #46515f;border-radius:4px}input[type=number]{width:88px}button{cursor:pointer}canvas{display:block;width:100%;height:200px;background:#161a20;margin:16px 0}pre{white-space:pre-wrap;background:#171c23;padding:12px;max-height:45vh;overflow:auto}.warn{color:#ffd54a}
+</style>
+<h1>純節拍實音測試（不執行音高分析）</h1>
+<p>直接使用 WiPitch 節拍快取、錨點尋找、小節追蹤及參考 BPM 模組。黃線為錨點，三角為演算法確認的小節起點。</p>
+<label>吉他 WAV <input id="file" type="file" accept="audio/wav,.wav"></label>
+<label>錨點秒 <input id="anchor" type="number" step="0.01" value="0"></label>
+<label>粗估 BPM <input id="bpm" type="number" step="1" value="120"></label>
+<label>拍號 <input id="meter" value="4/4" size="5"></label>
+<label>起始秒 <input id="start" type="number" step="1" value="0"></label>
+<label>結束秒 <input id="end" type="number" step="1" value="0"></label>
+<button id="run" disabled>執行節拍測試</button> <button id="save" disabled>下載 JSON 結果</button>
+<p id="status" class="warn">尚未載入音檔</p>
+<canvas id="wave"></canvas><pre id="out">待測試</pre>
+<script type="module">
+import {createReferenceCache,findOnset,trackBars} from '../src/analysis/reference-cache.ts';
+import {estimateReferenceTempo} from '../src/analysis/reference-tempo.ts';
+import {ViewState} from '../src/view/viewstate.ts';
+import {RefWaveformView} from '../src/view/waveform.ts';
+const $=id=>document.getElementById(id); let audio=null,cache=null,last=null;
+const view=new ViewState(), canvas=$('wave'), wave=new RefWaveformView(canvas,view);
+function draw(anchor=0,bars=[]){wave.draw(0,null,null,anchor,bars)}
+new ResizeObserver(()=>draw(Number($('anchor').value)||0,last?.barStartsSec||[])).observe(canvas);
+$('file').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{$('status').textContent=`解碼 ${f.name}（${(f.size/1e6).toFixed(1)} MB）…`;
+ const ctx=new AudioContext({sampleRate:48000}); audio=await ctx.decodeAudioData(await f.arrayBuffer()); const channels=Array.from({length:audio.numberOfChannels},(_,i)=>audio.getChannelData(i));
+ $('status').textContent='建立節拍快取…'; await new Promise(requestAnimationFrame); cache=createReferenceCache(channels,audio.sampleRate); wave.setAudio(channels,audio.sampleRate); view.duration=audio.duration; view.fit(canvas.clientWidth); $('end').value=audio.duration.toFixed(2); $('run').disabled=false; $('status').textContent=`已載入 ${f.name}｜${audio.numberOfChannels} 聲道｜${audio.sampleRate} Hz｜${audio.duration.toFixed(2)} 秒；只執行節拍分析。`; draw(); await ctx.close();
+ }catch(err){$('status').textContent='載入失敗：'+String(err);console.error(err)}};
+$('run').onclick=()=>{try{const anchor=Number($('anchor').value),rough=Number($('bpm').value),meter=$('meter').value,start=Number($('start').value),end=Number($('end').value)||cache.duration;
+ const onset=findOnset(cache,anchor,.5),tempo=estimateReferenceTempo([cache.mono16k],16000,Math.max(0,anchor),rough),bpm=tempo??rough;
+ const bars=trackBars(cache,anchor,bpm,meter,start,end); last={file:$('file').files[0].name,sampleRate:audio.sampleRate,channels:audio.numberOfChannels,durationSec:audio.duration,anchorSec:anchor,anchorSearchWindowSec:[Math.max(0,anchor-.5),anchor+.5],nearestOnsetSec:onset,nearestOnsetDeltaSec:onset===null?null:onset-anchor,roughBpm:rough,estimatedReferenceBpm:tempo,usedBpm:bpm,meter,analysisRangeSec:[start,end],barStartsSec:bars,barCount:bars.length,barTimeRangeSec:bars.length?[bars[0],bars.at(-1)]:null,notes:'候選演算法輸出；無人工節拍標註，不能據此推論準確率。未執行音高分析。'};
+ $('out').textContent=JSON.stringify(last,null,2);$('save').disabled=false;draw(anchor,bars);
+ }catch(err){$('out').textContent='測試失敗：'+String(err);console.error(err)}};
+$('save').onclick=()=>{const blob=new Blob([JSON.stringify(last,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='reference-beat-real-audio-result.json';a.click();URL.revokeObjectURL(a.href)};
+</script>
+</html>

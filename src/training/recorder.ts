@@ -9,10 +9,10 @@ const base64 = (blob: Blob): Promise<string> => new Promise((resolve, reject) =>
  reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.readAsDataURL(blob);
 });
 export function pitchPoints(curves: Curves, midi: Float32Array, voiced: Uint8Array, start: number, end: number) {
- const points: { time: number; sourceTime: number; midi: number | null; offset: number }[] = [];
+ const points: { time: number; sourceTime: number; midi: number | null; offset: number; formantOffset: number }[] = [];
  for (let t = start; t < end; t += CURVE_HOP_SEC) {
   const sourceTime = curves.timeMap.outToSrc(t), i = Curves.timeToFrame(sourceTime);
-  points.push({ time: t, sourceTime, midi: voiced[i] && Number.isFinite(midi[i]) ? midi[i] + curves.pitch[i] : null, offset: curves.pitch[i] ?? 0 });
+  points.push({ time: t, sourceTime, midi: voiced[i] && Number.isFinite(midi[i]) ? midi[i] + curves.pitch[i] : null, offset: curves.pitch[i] ?? 0, formantOffset: curves.formant[i] ?? 0 });
  }
  return points;
 }
@@ -73,7 +73,7 @@ export async function prepareTrainingPair(input: {
  const after = pitchPoints(input.after, input.midi, input.voiced, start, end);
  const layout = compactImageLayout(before, after, start, end);
  const payload = {
-  metadata: { schemaVersion: 3, ...input.metadata, recordId: String(crypto.randomUUID()), createdAt: new Date().toISOString(), kind: 'manual-pitch', approval: 'unreviewed',
+  metadata: { schemaVersion: 4, ...input.metadata, recordId: String(crypto.randomUUID()), createdAt: new Date().toISOString(), kind: 'manual-pitch', approval: 'unreviewed',
    clip: { start, end, duration: end - start }, sampleRate: input.sampleRate, key: key ?? null,
    image: layout,
    beforePoints: before, afterPoints: after },
@@ -95,7 +95,7 @@ async function trainingRequest(action: 'stage' | 'store-rejected' | 'reset' | 'c
 export async function stageTrainingPair(payload: TrainingPair): Promise<string> {
  return (await trainingRequest('stage', payload)).id;
 }
-/** 取消 AI 修正屬於明確負例，按下「取消AI修正標示」時直接保存至正式資料庫。 */
+/** 取消 AI 修正屬於明確負例，按下「完成工作」時直接保存至正式資料庫。 */
 export async function storeRejectedTrainingPair(payload: TrainingPair): Promise<string> {
  return (await trainingRequest('store-rejected', payload)).id;
 }

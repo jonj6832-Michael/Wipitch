@@ -93,6 +93,16 @@ async function toMono16k(buffer: AudioBuffer): Promise<Samples> {
 	return rendered.getChannelData(0).slice() as Samples;
 }
 
+/** 僅重取樣指定原始時間範圍，不重建整段主音軌分析暫存。 */
+export async function sourceRangeMono16k(source: Source, start: number, end: number): Promise<Samples> {
+	const from = Math.max(0, Math.floor(start * source.sampleRate));
+	const to = Math.min(source.channels[0].length, Math.ceil(end * source.sampleRate));
+	if (to <= from) throw new Error('主音軌檢測範圍無效');
+	const buffer = new AudioBuffer({ numberOfChannels: source.channels.length, length: to - from, sampleRate: source.sampleRate });
+	source.channels.forEach((channel, i) => buffer.copyToChannel(channel.subarray(from, to), i));
+	return toMono16k(buffer);
+}
+
 /** 把秒數格式化成 m:ss.mmm。行為與 pitchmark.py 的 fmt_time 一致。 */
 export function fmtTime(seconds: number): string {
 	if (!isFinite(seconds) || seconds < 0) seconds = 0;

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>WiPitch 使用說明</title>
+	<style>
+		:root{color-scheme:dark;--bg:#14171c;--panel:#1c2027;--line:#35404d;--text:#d8dee9;--dim:#9aa6b4;--accent:#5ac8fa}
+		*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.7 system-ui,-apple-system,"Noto Sans TC",sans-serif}
+		main{width:min(900px,calc(100% - 32px));margin:32px auto 64px}header{display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--line)}
+		h1{font-size:26px;margin:0 0 14px;color:var(--accent)}h2{margin-top:32px;font-size:19px;color:#b7e8ff}h3{font-size:16px;margin-bottom:4px}
+		p,li{color:var(--dim)}strong{color:var(--text)}a{color:var(--accent)}.back{padding:6px 12px;border:1px solid var(--line);border-radius:6px;text-decoration:none;white-space:nowrap}
+		.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 18px;margin:12px 0}kbd{border:1px solid #596675;border-radius:4px;padding:1px 5px;background:#252b34;color:var(--text)}
+	</style>
+</head>
+<body><main>
+	<header><h1>WiPitch 使用說明</h1><a class="back" href="./">返回程式</a></header>
+	<section><h2>基本流程</h2><ol>
+		<li>按<strong>開啟音檔</strong>選擇人聲 WAV 或其他瀏覽器可解碼的音訊，等待音高分析完成。</li>
+		<li>在音高預覽區檢查藍色音高曲線；左側鋼琴鍵可試聽音符。</li>
+		<li>選擇 Key，使用檢測列圈出要檢查或 AI 修正的時間範圍。</li>
+		<li>完成編輯後可<strong>存檔</strong>保留專案設定，或<strong>匯出 WAV</strong>取得處理後音訊。</li>
+	</ol></section>
+	<section><h2>手動編輯</h2><div class="card"><h3>選取工具</h3><p>在音高區拖曳選取時間範圍，再調整音高、抖動、音量或 Formant。Formant 改變音色共振峰，不會直接改變目標音符。</p></div>
+	<div class="card"><h3>畫筆／標記</h3><p>在曲線區畫出調整曲線；在波形區加入時間錨點。AI 黃框存在時，只允許操作黃框內的音高與 Formant。</p></div>
+	<div class="card"><h3>縮放</h3><p>音高區滾輪或觸控板開合會以游標所在位置為中心縮放時間；鋼琴鍵與右側縱向控制區則以游標高度縮放音高範圍。</p></div></section>
+	<section><h2>AI 修音</h2><ol>
+		<li>先選擇 Key，並在檢測列設定範圍。</li><li>在 AI 設定選擇傳統內建、內建 AI 或外部 AI，再設定修正程度。</li>
+		<li>修正後的區域會以黃色框標示。框內上下拖曳可微調音高；底部綠色滑桿可調整 Formant，調整後可使用播放控制自行試聽。</li>
+		<li>取消框內勾選可恢復該區域；按「放棄」會恢復整次 AI 修音前的狀態，按「完成工作」會保留目前聲音並結束黃框審核。</li>
+	</ol></section>
+	<section><h2>檔案功能</h2><ul><li><strong>開啟音檔：</strong>載入新的原始音訊並清除上一個檔案的工作暫存。</li><li><strong>存檔／讀檔：</strong>保存或恢復專案曲線、設定及原始音檔路徑。</li><li><strong>匯出 WAV：</strong>輸出完整修音結果，並提交符合條件的訓練暫存資料。</li></ul></section>
+	<section><h2>常用快捷鍵</h2><p><kbd>Space</kbd> 播放／暫停　<kbd>S</kbd> 選取工具　<kbd>B</kbd> 畫筆　<kbd>L</kbd> 循環　<kbd>F</kbd> 跟隨播放頭　<kbd>Esc</kbd> 取消選取　<kbd>⌘/Ctrl Z</kbd> 復原</p></section>
+</main></body></html>

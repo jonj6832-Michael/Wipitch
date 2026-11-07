@@ -14,21 +14,59 @@ const CONTEXT = 4096;          // 每塊前後多帶的前後文（16 格）
 const CONTEXT_FRAMES = CONTEXT / HOP;
 
 export function installSwiftF0Worker(ort: typeof Ort, backend: ComputeBackend) {
+	// 每個 WASM Worker 代表一個 CPU 工作槽；避免 cross-origin isolated 部署時
+	// ONNX Runtime 在每個 Worker 內再次展開執行緒而造成 CPU 過度訂閱。
+	if (ort.env.wasm) ort.env.wasm.numThreads = 1;
+	let retainedSession: Ort.InferenceSession | null = null;
+	const createSession = async (modelUrl: string) => {
+		if (backend === 'webgpu' && !('gpu' in self.navigator)) throw new Error('此瀏覽器未提供 WebGPU');
+		const session = await ort.InferenceSession.create(modelUrl, {
+			executionProviders: backend === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'],
+		});
+		if (backend === 'webgpu' && !(await ort.env.webgpu.device)) {
+			await session.release();
+			throw new Error('WebGPU 裝置初始化失敗');
+		}
+		return session;
+	};
 	self.onmessage = async (e: MessageEvent) => {
-		const { audio, modelUrl } = e.data as { audio: Float32Array; modelUrl: string };
+		const data = e.data as { type?: 'init' | 'analyse' | 'dispose'; id?: number; audio?: Float32Array; modelUrl?: string };
+		// Worker pool protocol: initialize once, then analyse multiple time segments.
+		if (data.type === 'init') {
+			try {
+				retainedSession = await createSession(data.modelUrl!);
+				self.postMessage({ type: 'ready', backend });
+			} catch (err) {
+				self.postMessage({ type: 'error', error: err instanceof Error ? err.message : String(err) });
+			}
+			return;
+		}
+		if (data.type === 'analyse') {
+			try {
+				if (!retainedSession || !data.audio) throw new Error('音高 Worker 尚未初始化');
+				const result = await analyse(ort, retainedSession, data.audio,
+					progress => self.postMessage({ type: 'progress', id: data.id, progress }));
+				self.postMessage({ type: 'result', id: data.id, ...result },
+					[result.f0.buffer, result.confidence.buffer, result.voiced.buffer]);
+			} catch (err) {
+				self.postMessage({ type: 'error', id: data.id, error: err instanceof Error ? err.message : String(err) });
+			}
+			return;
+		}
+		if (data.type === 'dispose') {
+			try { await retainedSession?.release(); } finally { retainedSession = null; self.postMessage({ type: 'disposed' }); }
+			return;
+		}
+
+		// Backward-compatible one-shot protocol used by diagnostics and fallback tests.
+		const { audio, modelUrl } = data as { audio: Float32Array; modelUrl: string };
 		let session: Ort.InferenceSession | null = null;
 		try {
-			if (backend === 'webgpu' && !('gpu' in self.navigator)) {
-				throw new Error('此瀏覽器未提供 WebGPU');
-			}
 			self.postMessage({ stage: backend === 'webgpu' ? '載入音高模型（GPU 優先）' : '載入音高模型（CPU）' });
-			session = await ort.InferenceSession.create(modelUrl, {
-				executionProviders: backend === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'],
-			});
-			if (backend === 'webgpu' && !(await ort.env.webgpu.device)) throw new Error('WebGPU 裝置初始化失敗');
+			session = await createSession(modelUrl);
 			self.postMessage({ backend });
 			self.postMessage({ stage: '分析音高' });
-			const result = await analyse(ort, session, audio);
+			const result = await analyse(ort, session, audio, progress => self.postMessage({ progress }));
 			await session.release();
 			session = null;
 			self.postMessage({ ok: true, ...result }, [result.f0.buffer, result.confidence.buffer, result.voiced.buffer]);
@@ -39,7 +77,8 @@ export function installSwiftF0Worker(ort: typeof Ort, backend: ComputeBackend) {
 	};
 }
 
-async function analyse(ort: typeof Ort, session: Ort.InferenceSession, audio: Float32Array) {
+async function analyse(ort: typeof Ort, session: Ort.InferenceSession, audio: Float32Array,
+	onProgress: (fraction: number) => void) {
 	const totalFrames = Math.max(1, Math.floor((audio.length - HOP) / HOP) + 1);
 	const f0 = new Float32Array(totalFrames);
 	const confidence = new Float32Array(totalFrames);
@@ -74,7 +113,7 @@ async function analyse(ort: typeof Ort, session: Ort.InferenceSession, audio: Fl
 			if (out) for (const value of Object.values(out)) value.dispose();
 		}
 
-		self.postMessage({ progress: Math.min(1, (start + CHUNK) / audio.length) });
+		onProgress(Math.min(1, (start + CHUNK) / audio.length));
 	}
 
 	const voiced = new Uint8Array(totalFrames);

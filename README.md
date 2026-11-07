@@ -36,6 +36,11 @@ wipitch
 
 ### 從原始碼執行
 
+Windows 與 macOS 開發請使用 Node **22.23.2**（見 `.nvmrc`）。換作業系統後重新執行 `npm ci`，不要沿用另一平台的 `node_modules`。Windows 可雙擊 `start-wipitch.cmd`，或使用 `npm run dev:local`。
+
+四平台的執行方式、行動裝置限制及驗收清單見 [跨平台開發說明](docs/CROSS_PLATFORM.md)。
+
+
 ```
 git clone https://code.wiwi.blog/wiwi/WiPitch.git
 cd WiPitch

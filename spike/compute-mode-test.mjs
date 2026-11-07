@@ -51,6 +51,24 @@ for(const backend of ['wasm','webgpu']) {
 	assert.equal(result.messages.at(-1).f0[0],440);assert.equal(result.released,1);assert.equal(result.disposed,3);
 }
 
+// Pool protocol: one model session serves multiple segments and releases once at the end.
+{
+	const messages=[];let creates=0,runs=0,releases=0;
+	globalThis.self={navigator:{},postMessage:message=>messages.push(message)};
+	const fakeOrt={
+		env:{webgpu:{}},Tensor:class{dispose(){}},
+		InferenceSession:{create:async()=>{creates++;return{inputNames:['audio'],outputNames:['f0','confidence'],
+			release:async()=>releases++,run:async()=>{runs++;return{f0:{data:Float32Array.of(440),dispose(){}},confidence:{data:Float32Array.of(1),dispose(){}}};}};}},
+	};
+	installSwiftF0Worker(fakeOrt,'wasm');
+	await self.onmessage({data:{type:'init',modelUrl:'test.onnx'}});
+	await self.onmessage({data:{type:'analyse',id:1,audio:new Float32Array(256)}});
+	await self.onmessage({data:{type:'analyse',id:2,audio:new Float32Array(256)}});
+	await self.onmessage({data:{type:'dispose'}});
+	assert.equal(creates,1);assert.equal(runs,2);assert.equal(releases,1);
+	assert.deepEqual(messages.filter(message=>message.type==='result').map(message=>message.id),[1,2]);
+}
+
 // 前景與背景任務重疊時，必須等所有工作完成才可切換。
 const store = new Map();globalThis.localStorage={getItem:k=>store.get(k),setItem:(k,v)=>store.set(k,v)};
 let change;

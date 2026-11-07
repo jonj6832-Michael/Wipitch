@@ -9,7 +9,15 @@
 </head>
 <body>
 	<header>
-		<h1><a href="https://nicechord.com" target="_blank" rel="noopener">WiPitch <span class="by">by NiceChord</span></a></h1>
+		<time id="build-version" title="本程式此次編譯的台北時間">建置 __WIPITCH_BUILD_TIME__</time>
+		<label id="workspace-selector" title="依目前工作選擇介面配置；選擇會保留在這台瀏覽器">
+			<span>工作區</span>
+			<select id="workspace-layout" aria-label="介面工作區">
+				<option value="workstation">完整工作站</option>
+				<option value="focus">專注編輯</option>
+				<option value="readable">高可讀性</option>
+			</select>
+		</label>
 		<button id="open-audio" type="button">開啟音檔</button>
 		<input type="file" id="file" accept="audio/*" hidden aria-hidden="true">
 		<div class="transport">
@@ -33,17 +41,20 @@
 		</div>
 		<div id="status">拖一個音檔進來，或按「開啟音檔」</div>
 		<div id="hint"></div>
-		<a id="help-link" href="https://code.wiwi.blog/wiwi/WiPitch" target="_blank" rel="noopener" title="使用說明與原始碼" aria-label="使用說明與原始碼">?</a>
+		<a id="help-link" href="./help.html" title="WiPitch 使用說明" aria-label="開啟 WiPitch 使用說明">?</a>
 	</header>
 	<div id="ai-toolbar" aria-label="AI 音高修正">
 		<button id="ai-settings-open" type="button">AI 設定</button>
 			<span id="ai-service">傳統內建模式（固定規則）</span>
 		<label for="ai-strength">修正程度</label>
 			<input id="ai-strength" type="range" min="1" max="10" step="1" value="5" title="傳統模式：等級越高，越小的走音也會被選中；入選後完整修正音高中心。">
-			<output id="ai-strength-value" for="ai-strength">5 / 10 · ≥30¢</output>
-		<button id="ai-correct" type="button" disabled>AI 修正</button>
-		<button id="ai-undo" type="button" disabled>取消AI修改</button>
-        <button id="ai-clear-marks" type="button" disabled>取消AI修正標示</button>
+			<output id="ai-strength-value" for="ai-strength">5 / 10 · ≥288ms</output>
+		<button id="ai-correct" type="button" disabled>AI 檢測</button>
+		<label class="tempo-field">拍號 <select id="tempo-meter" aria-label="預設拍號"><option value="4/4">4/4</option><option value="3/4">3/4</option><option value="2/2">2/2</option></select></label>
+		<label class="tempo-field">BPM <input id="tempo-bpm" type="number" min="30" max="300" step="1" value="120" aria-label="預設 BPM"></label>
+		<button id="sync-reference" type="button" disabled aria-pressed="false" title="請先載入參考音軌">同步參考音軌</button>
+		<button id="ai-undo" type="button" disabled>放棄</button>
+		<button id="ai-clear-marks" type="button" disabled>完成工作</button>
 		<button id="ai-cancel" type="button" hidden>取消修正</button>
 		<span id="ai-status" role="status">選擇 Key 並在檢測列標示範圍</span>
 	</div>
@@ -68,6 +79,12 @@
 				<label id="key-filter-control" title="調外音的琴鍵顯示灰白；AI 修正以此 Key 作為目標音階">
 					Key <select id="key-filter" aria-label="調性 Key 過濾器"><option value="">全部音</option></select>
 				</label>
+				<div id="lane-bar" aria-label="編輯工具">
+					<div class="tools">
+						<button id="tool-select" class="tool on" title="選取工具（S）">▭ 選取</button>
+						<button id="tool-pen" class="tool" title="畫筆／標記工具（B）：在曲線區畫線，在波形區點擊加錨點">✎ 畫筆╱標記</button>
+					</div>
+				</div>
 				<!-- 第二列：選取工具且有選取 → 參數面板；畫筆工具 → 畫筆選項；其他 → 隱藏 -->
 				<div class="pen-opts" id="pen-opts" hidden>
 					<span class="group">
@@ -118,20 +135,11 @@
 						<output id="formant-out">0.00 半音</output>
 					</div>
 				</div>
-				<div id="lane-bar">
-					<div class="tools">
-						<button id="tool-select" class="tool on" title="選取工具（S）">▭ 選取</button>
-						<button id="tool-pen" class="tool" title="畫筆／標記工具（B）：在曲線區畫線，在波形區點擊加錨點">✎ 畫筆╱標記</button>
-					</div>
-					<div class="lane-chips" id="lane-chips">
-						<!-- 由 main.ts 填入：每條 lane 一組「顯示 / 編輯」 -->
-					</div>
-				</div>
 			</div>
 			<div id="detection-tools">
 				<span id="detection-status">拖曳下方檢測 bar 設定範圍</span>
 				<button id="detection-all" type="button">檢測全段</button><button id="detection-clear" type="button">清除檢測</button>
-				<span class="detection-legend" title="以修改後音高與最近調內音比較；與兩個調內音等距時採較低音作基準"><span class="near">原色：偏差 &lt;50 cents</span> · <span class="sharp">紅：偏高 ≥50</span> · <span class="flat">綠：偏低 ≥50</span></span>
+				<span class="detection-legend" title="以修改後音高與最近調內音比較；與兩個調內音等距時採較低音作基準"><span class="near">藍：偏差 &lt;25 cents</span> · <span class="sharp">紅：偏高 ≥25</span> · <span class="flat">綠：偏低 ≥25</span></span>
 			</div>
 			<div id="detection-row"><span>檢測</span><div id="detection-bar" aria-label="獨立音高檢測範圍" title="拖曳空白處圈選；拖左右端點調整、拖中間移動範圍；端點可用左右方向鍵調整"></div></div>
 			<div id="pianoroll-wrap">
@@ -153,6 +161,8 @@
 			<input type="range" id="ref-amp-zoom" min="0" max="1" step="0.001" value="0.2314"
 				title="參考音軌波形放大（只影響顯示）。雙擊還原（Alt+滾輪）">
 			<div id="bg-bar">
+				<button id="ref-anchor-set" type="button" title="搜尋播放紅線左右各 0.5 秒內的起音作為錨點，依 BPM 與拍號預覽前後各四小節；不需先選取範圍">⚓ 錨定</button>
+				<span id="ref-beat-status" role="status">尚未錨定</span>
 				<label class="file" title="載入一個一起播放的參考音檔（伴奏、導唱），只用來監聽，不會匯出">
 					<span id="bg-file-text">載入參考音軌</span><input type="file" id="bg-file" accept="audio/*">
 				</label>
@@ -167,6 +177,7 @@
 					<span class="unit">ms</span>
 					<button id="bg-remove" title="移除參考音軌">✕</button>
 				</span>
+				<output id="ref-average-bpm" hidden aria-live="polite"></output>
 			</div>
 		</div>
 	</main>
@@ -198,6 +209,9 @@
 		<div id="compute-control">
 			<label for="compute-mode">音高運算</label>
 			<select id="compute-mode"><option value="gpu">GPU 優先</option><option value="wasm">CPU（WASM）</option></select>
+			<button id="compute-benchmark" type="button">GPU／CPU 測速</button>
+			<input id="compute-benchmark-file" type="file" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg" hidden>
+			<span id="compute-benchmark-status" role="status"></span>
 			<span id="compute-status" role="status">下次分析：GPU 優先</span>
 		</div>
 		<label id="progress-label" for="progress-bar" role="status">等待載入音檔</label>

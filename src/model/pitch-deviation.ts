@@ -25,5 +25,5 @@ export function pitchDeviation(midi: number, key: KeySignature | null): PitchDev
 		}
 	}
 	const cents = (midi - targetMidi) * 100;
-	return { targetMidi, cents, direction: cents >= 50 ? 'sharp' : cents <= -50 ? 'flat' : 'near' };
+	return { targetMidi, cents, direction: cents >= 25 ? 'sharp' : cents <= -25 ? 'flat' : 'near' };
 }

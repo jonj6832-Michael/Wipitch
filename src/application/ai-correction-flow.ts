@@ -1,4 +1,6 @@
+import { selectRuleNotes } from '../model/rule-selection';
 import { contextCorrectionNotes } from '../model/context-correction';
+import type { ReferenceRhythm } from '../analysis/reference-cache';
 import { applyCorrection, type CorrectionNote } from '../model/auto-pitch';
 import { suggestCorrections, type AISettings } from '../analysis/ai-correction';
 import type { Curves } from '../model/curves';
@@ -16,6 +18,9 @@ export interface CorrectionInput {
 	segments?: { start: number; end: number }[];
 	level: number;
 	settings: AISettings;
+	referenceRhythm?: ReferenceRhythm;
+	/** 0 = 引擎已保留原音色；大於 0 時 AI 以反向 Formant 曲線抵銷移調造成的音色位移。 */
+	formantFollow?: number;
 }
 
 export interface CorrectionUpdate {
@@ -95,12 +100,16 @@ export class AICorrectionFlow {
 			}
 			if (controller.signal.aborted) throw new Error('AI 修正已取消，未套用變更');
 			if (!notes.length) throw new Error('檢測範圍內沒有足夠可靠的修正候選；缺少穩定參考的起音及不確定段落會保留');
+			if (settings.provider === 'rules') {
+				notes = selectRuleNotes(before, notes, midi, voiced, level);
+				if (!notes.length) { finishLabel = '沒有符合持續時間的偏離區段'; return { status: 'unchanged' }; }
+			}
 			const decisions = await (d.suggest ?? suggestCorrections)(settings, notes, key, controller.signal, (done, total) => {
 				notify({ message: `AI 建議 ${done} / ${total} 批（${notes.length} 個音符）`, label: 'AI 分析音符摘要', fraction: total ? done / total : 0, cancellable: !controller.signal.aborted });
-			});
+			}, fetch, snapshot.referenceRhythm);
 			if (controller.signal.aborted) throw new Error('AI 修正已取消，未套用變更');
 			const result = applyCorrection(before, notes, decisions, key, level, voiced,
-				settings.provider === 'rules' ? 'sensitivity' : 'strength');
+				settings.provider === 'rules' ? 'sensitivity' : 'strength', snapshot.formantFollow ?? 0);
 			if (!result.count || d.sameCurves(before, result.curves)) { finishLabel = '沒有套用修正'; return { status: 'unchanged' }; }
 			this.cancellable = false;
 			notify({ message: '正在套用修正音訊…', label: '算繪修正音訊', cancellable: false });

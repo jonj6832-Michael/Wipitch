@@ -4,14 +4,18 @@ const STORAGE_KEY = 'wipitch.compute-mode';
 export class ComputeModeControl {
 	mode: ComputeMode = 'gpu';
 	private backend: BackendStatus | null = null;
+	setMode(mode: ComputeMode) {
+		this.mode = mode;
+		this.select.value = mode;
+		try { localStorage.setItem(STORAGE_KEY, mode); } catch { /* 私密模式仍可使用。 */ }
+		this.ready();
+	}
 	constructor(private select: HTMLSelectElement, private status: HTMLElement, private isBusy: () => boolean) {
 		try { if (localStorage.getItem(STORAGE_KEY) === 'wasm') this.mode = 'wasm'; } catch { /* 私密模式仍可使用。 */ }
 		select.value = this.mode;
 		select.addEventListener('change', () => {
 			if (this.isBusy()) { select.value = this.mode; return; }
-			this.mode = select.value === 'wasm' ? 'wasm' : 'gpu';
-			try { localStorage.setItem(STORAGE_KEY, this.mode); } catch { /* 不影響本次選擇。 */ }
-			this.ready();
+			this.setMode(select.value === 'wasm' ? 'wasm' : 'gpu');
 		});
 		this.ready(); this.sync();
 	}

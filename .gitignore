@@ -20,3 +20,6 @@ spike/out/
 /AI訓練/
 
 /AI訓練暫存/
+
+# 專案內 npm 安裝快取
+.npm-cache/

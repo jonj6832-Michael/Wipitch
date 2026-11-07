@@ -1,0 +1,11 @@
+{
+  "date": "2026-11-06",
+  "files": 3833,
+  "trainingFiles": 3605,
+  "trainingBytes": 1193767658,
+  "records": 597,
+  "invalidJson": [],
+  "missingMedia": [],
+  "syntaxChecked": 75,
+  "syntaxFailures": []
+}

@@ -23,7 +23,8 @@ export async function inspectLocalAudio(inputPath) {
 }
 
 export function pickAudioPath() {
-	if (process.platform !== 'darwin') return Promise.reject(new Error('目前的本機檔案選擇器僅支援 macOS'));
+	if (process.platform === 'win32') return pickWindowsAudioPath();
+ if (process.platform !== 'darwin') return Promise.reject(new Error('請使用瀏覽器的檔案選擇器載入音訊'));
 	return new Promise((resolve, reject) => {
 		const script = 'set selectedFile to choose file with prompt "選擇 WiPitch 音訊檔" of type {"public.audio"}\nPOSIX path of selectedFile';
 		const child = spawn('/usr/bin/osascript', ['-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -47,4 +48,22 @@ export function streamLocalAudio(res, audio) {
 	res.setHeader('X-Audio-Name', encodeURIComponent(audio.name));
 	res.setHeader('X-Audio-Last-Modified', String(audio.lastModified));
 	createReadStream(audio.path).pipe(res);
+}
+
+function pickWindowsAudioPath() {
+ const script = `Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Filter = 'Audio|*.wav;*.wave;*.mp3;*.m4a;*.aac;*.flac;*.aif;*.aiff;*.ogg;*.opus|All files|*.*'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Write($dialog.FileName) }
+$dialog.Dispose()`;
+ return new Promise((resolve, reject) => {
+  const child = spawn('powershell.exe', ['-NoProfile', '-STA', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '', errors = '';
+  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { errors += chunk; });
+  child.on('error', reject);
+  child.on('close', code => code === 0 ? resolve(output.trim() || null) : reject(new Error(errors.trim() || '無法開啟 Windows 音訊選擇器')));
+ });
 }
