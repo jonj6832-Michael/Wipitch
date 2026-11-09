@@ -2,18 +2,30 @@ import type { AIRegion } from '../model/ai-regions';
 import { Curves } from '../model/curves';
 export class AIRegionOverlay {
  private root:HTMLDivElement;
+ private manualBox:HTMLDivElement;
  private items=new Map<number,{box:HTMLDivElement;check:HTMLInputElement;formant:HTMLInputElement;formantOut:HTMLOutputElement;pendingEnabled:null|boolean;pendingEdited:null|boolean}>();
  private range={lo:0,hi:1};
  private height=1;
  constructor(parent:HTMLElement,private change:(r:AIRegion,enabled:boolean,offset:number,formantOffset:number)=>Promise<void>,
   private preview?:(r:AIRegion|null,enabled?:boolean,offset?:number,formantOffset?:number)=>void) {
   this.root=document.createElement('div');this.root.className='ai-regions';parent.appendChild(this.root);
+  this.manualBox=document.createElement('div');this.manualBox.className='ai-region manual-selection-region';
+  this.manualBox.hidden=true;this.manualBox.setAttribute('aria-hidden','true');this.root.appendChild(this.manualBox);
  }
  /** 黃框收到的滾輪／觸控板事件會冒泡到這裡，供應用層沿用時間軸縮放手勢。 */
  get gestureTarget(): HTMLElement { return this.root; }
- clear(){this.preview?.(null);this.root.replaceChildren();this.items.clear();}
- draw(regions:AIRegion[],curves:Curves,_midi:Float32Array,x:(t:number)=>number,range:{lo:number;hi:number},height:number,locked:boolean) {
+ clear(){this.preview?.(null);for(const item of this.items.values())item.box.remove();this.items.clear();this.manualBox.hidden=true;}
+ draw(regions:AIRegion[],curves:Curves,_midi:Float32Array,x:(t:number)=>number,range:{lo:number;hi:number},height:number,locked:boolean,manualSelection:{start:number;end:number}|null=null) {
   this.range=range;this.height=height;
+  const manualOverlaps=manualSelection&&regions.some(region=>{
+   const start=curves.timeMap.srcToOut(Curves.frameToTime(region.from)),end=curves.timeMap.srcToOut(Curves.frameToTime(region.to));
+   return start<manualSelection.end&&end>manualSelection.start;
+  });
+  if(manualSelection&&manualSelection.end>manualSelection.start&&!manualOverlaps){
+   const left=x(manualSelection.start),right=x(manualSelection.end);
+   Object.assign(this.manualBox.style,{left:`${left}px`,width:`${Math.max(2,right-left)}px`,top:'0px',height:`${height}px`});
+   this.manualBox.hidden=false;
+  }else this.manualBox.hidden=true;
   for(const region of regions) {
    let item=this.items.get(region.id);
    if(!item){

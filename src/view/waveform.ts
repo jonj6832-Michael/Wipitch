@@ -160,7 +160,9 @@ export class RefWaveformView {
 		this.peaks = buildPeaks(mono);
 	}
 
-	draw(playhead: number, selection: { start: number; end: number } | null, loop: { start: number; end: number } | null, beatAnchor: number | null = null, barStarts: readonly number[] = [], bpm = 120, meter = '4/4', analyzedBeats = false, beatRecords: readonly ReferenceBeatRecord[] = []) {
+	draw(playhead: number, selection: { start: number; end: number } | null, loop: { start: number; end: number } | null,
+		beatAnchors: readonly number[] = [], barStarts: readonly number[] = [], virtualBarStarts: readonly number[] = [],
+		bpm = 120, meter = '4/4', analyzedBeats = false, beatRecords: readonly ReferenceBeatRecord[] = []) {
 		const { canvas, ctx, view } = this;
 		const dpr = window.devicePixelRatio || 1;
 		const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -206,14 +208,27 @@ export class RefWaveformView {
 			const size = first ? 6 : 4;
 			ctx.beginPath(); ctx.moveTo(x, h - 2 - size * 2); ctx.lineTo(x - size, h - 2); ctx.lineTo(x + size, h - 2); ctx.closePath(); ctx.fill();
 		};
+		const drawVirtualBeat = (time: number) => {
+			const x = view.timeToX(time);
+			if (x < -7 || x > w + 7) return;
+			const y = h - 8, size = 5;
+			ctx.strokeStyle = '#65d68c'; ctx.lineWidth = 2;
+			ctx.beginPath();
+			ctx.moveTo(x - size, y - size); ctx.lineTo(x + size, y + size);
+			ctx.moveTo(x + size, y - size); ctx.lineTo(x - size, y + size);
+			ctx.stroke();
+		};
 		if (!analyzedBeats) for (const marker of referenceBeatGrid(barStarts, bpm, meter)) {
 			if (marker.barIndex === barStarts.length - 1 && !marker.downbeat) continue;
-			drawBeat(marker.time, marker.downbeat, false);
+			const virtual = marker.downbeat && virtualBarStarts.some(time => Math.abs(time - marker.time) < 0.005);
+			if (virtual) drawVirtualBeat(marker.time);
+			else drawBeat(marker.time, marker.downbeat, false);
 		}
 		for (const row of beatRecords) {
-			drawBeat(row.timeSec, row.beatInBar === 1, true);
+			if (row.virtual) drawVirtualBeat(row.timeSec);
+			else drawBeat(row.timeSec, row.beatInBar === 1, true);
 		}
-		if (beatAnchor !== null) {
+		for (const beatAnchor of beatAnchors) {
 			const ax = view.timeToX(beatAnchor);
 			if (ax >= -10 && ax <= w + 10) {
 				ctx.strokeStyle = '#ffd54a'; ctx.lineWidth = 2;

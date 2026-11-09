@@ -6,7 +6,7 @@ if (Number(process.versions.node.split('.')[0]) !== 22) {
 const tests = [
  'work-state', 'ai-correction-flow', 'ai-context', 'ai-correction', 'builtin-ai', 'compute-mode',
  'load-lifecycle', 'note-preview', 'zoom-gesture', 'detection-bar',
-	'pitch-deviation', 'timemap', 'slope-limit', 'diagnostics', 'training', 'project', 'local-audio', 'audio-segments', 'pitch-segments',
+	'pitch-deviation', 'timemap', 'slope-limit', 'reference-beat-table', 'diagnostics', 'training', 'project', 'local-audio', 'audio-segments', 'pitch-segments',
 ];
 for (const name of tests) {
  console.log(`\nChecking ${name}`);

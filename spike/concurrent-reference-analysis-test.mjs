@@ -36,14 +36,27 @@ if (!isMainThread) {
 	const worker = new Worker(new URL(import.meta.url));
 	try {
 		await new Promise((resolve, reject) => { worker.once('error', reject); worker.once('message', resolve); });
-		const audio = new Float32Array(12 * 16000), onsets = new Float32Array(1200);
-		for (const t of [1, 3.02, 5.06, 7.12, 9.2, 11.3]) onsets[Math.round(t * 100)] = 1;
+		const audio = new Float32Array(12 * 16000);
 		const response = new Promise((resolve, reject) => { worker.once('error', reject); worker.once('message', resolve); });
-		worker.postMessage({ audio, onsets, anchorSec: 1.2, bpm: 120, meter: '4/4', estimate: false });
+		worker.postMessage({ audio, anchorSec: 1.2, bpm: 120, meter: '4/4', bpmTolerance: 0.05 });
 		const { result, error } = await response;
 		assert.equal(error, undefined);
-		assert.equal(result.anchorSec, 1, '正式 Worker 檢測才把紅線附近起音吸附為錨點');
-		assert.deepEqual(result.barStartsSec, [1, 3.02, 5.06, 7.12, 9.2, 11.3]);
-		console.log('PASS: 錨點附近搜尋、無選取範圍的前後四小節預覽、BPM 更新、邊界裁切、三項並行及變速追蹤');
+		assert.equal(result.anchorSec, 1.2, 'Worker must preserve the user-confirmed anchor');
+		assert.deepEqual(result.barStartsSec, [1.2, 3.2, 5.2, 7.2, 9.2, 11.2]);
+		assert.deepEqual(result.virtualBarStartsSec, [3.2, 5.2, 7.2, 9.2, 11.2], 'silence keeps every predicted point as a virtual marker');
+		const { trackBarSequence } = await import('../src/analysis/reference-cache.ts');
+		const missingOnsets = new Float32Array(1200);
+		for (const t of [3.1, 7.25]) missingOnsets[Math.round(t * 100)] = 1;
+		assert.deepEqual(trackBarSequence({ mono16k: audio, onsets: missingOnsets, duration: 12 }, 1, 120, '4/4', 0, 12), [
+			{ timeSec: 1, confirmed: true }, { timeSec: 3.1, confirmed: true },
+			{ timeSec: 5.2, confirmed: false }, { timeSec: 7.25, confirmed: true },
+			{ timeSec: 9.3, confirmed: false }, { timeSec: 11.350000000000001, confirmed: false },
+		], 'a miss inside the BPM-derived sequence is retained as a virtual beat and remains the next prediction cursor');
+		const outsideWindow = new Float32Array(800); outsideWindow[311] = 1;
+		assert.deepEqual(trackBarSequence({ mono16k: new Float32Array(8 * 16000), onsets: outsideWindow, duration: 8 }, 1, 120, '4/4', 0, 8), [
+			{ timeSec: 1, confirmed: true }, { timeSec: 3, confirmed: false },
+			{ timeSec: 5, confirmed: false }, { timeSec: 7, confirmed: false },
+		], '113.7 BPM is just outside the 120 BPM -5% boundary, but every missed point remains marked');
+		console.log('PASS: fixed anchor, sequential BPM ±5% search, missing-beat carry-forward and virtual markers');
 	} finally { await worker.terminate(); }
 }

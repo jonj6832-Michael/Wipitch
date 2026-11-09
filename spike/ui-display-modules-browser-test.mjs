@@ -15,6 +15,8 @@ try {
 			helpPath: new URL(document.querySelector('#help-link').href).pathname,
 			helpIsLocal: helpHtml.includes('<title>WiPitch 使用說明</title>'),
 			workspaceSelector: document.querySelector('#workspace-layout') instanceof HTMLSelectElement,
+			beatClearAfterAnchor: document.querySelector('#ref-anchor-set')?.nextElementSibling?.id === 'ref-beat-clear',
+			beatClearDisabledInitially: document.querySelector('#ref-beat-clear')?.disabled === true,
 		};
 		const [{ EditInspectorView }, { ToolLaneControlsView }, { TransportView }, { ReferenceTrackControlsView }, { HeaderPanelView }, { AIToolbarView }, { EditorOptionsView }, { GlobalControlsView }, { DetectionControlsView }, { LoadReportView }, { WorkspaceLayoutView }, { AIRegionOverlay }, { bindZoomGesture }, { Curves }] = await Promise.all([
 			import('/src/ui/edit-inspector.ts'), import('/src/ui/tool-lane-controls.ts'), import('/src/ui/transport.ts'), import('/src/ui/reference-track-controls.ts'),
@@ -93,8 +95,9 @@ try {
 		const overlayCurves = new Curves(100);
 		const region = { id: 1, from: 10, to: 90, kind: 'center', enabled: true, edited: false, offset: 0, formantOffset: 0,
 			original: new Float32Array(80), ai: new Float32Array(80), adjusted: new Float32Array(80), originalFormant: new Float32Array(80), aiFormant: new Float32Array(80), adjustedFormant: new Float32Array(80), recordId: 'test' };
-		overlay.draw([region], overlayCurves, new Float32Array(100), t => t * 100, { lo: 48, hi: 72 }, 300, false);
-		const yellowBox = overlayHost.querySelector('.ai-region');
+		overlay.draw([region], overlayCurves, new Float32Array(100), t => t * 100, { lo: 48, hi: 72 }, 300, false, { start: .92, end: 1.15 });
+		const yellowBox = overlayHost.querySelector('.ai-region:not(.manual-selection-region)');
+		const manualBox = overlayHost.querySelector('.manual-selection-region');
 		const zoomEvents = [];
 		bindZoomGesture(overlay.gestureTarget, factor => zoomEvents.push(factor), () => true);
 		yellowBox.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, bubbles: true, cancelable: true }));
@@ -109,6 +112,7 @@ try {
 			transportEvents, playText: host.querySelector('#play').textContent, loopOn: host.querySelector('#loop-btn').classList.contains('on'), followOn: host.querySelector('#follow-btn').classList.contains('on'), clock: host.querySelector('#clock').textContent,
 			referenceEvents, referenceName: host.querySelector('#bg-name').textContent, referenceMuted: host.querySelector('#bg-mute').classList.contains('on'), referenceGain: host.querySelector('#bg-vol-out').textContent, referenceOffset: host.querySelector('#bg-offset').value,
 			zoomEvents, overlayEvents, formantValue: overlayHost.querySelector('.ai-region-formant output').textContent,
+			manualBox: { hidden: manualBox.hidden, left: manualBox.style.left, width: manualBox.style.width, pointerEvents: getComputedStyle(manualBox).pointerEvents },
 			panelEvents, aiEvents, optionEvents, globalEvents, detectionEvents,
 			workspaceEvents, workspace: workspace.current, workspaceData: document.body.dataset.workspace, storedWorkspace: localStorage.getItem('wipitch.workspace-layout.v1'),
 			headerStatus: host.querySelector('#status').textContent, headerMode: host.querySelector('#mode-instrument').classList.contains('on'), aiStatus: host.querySelector('#ai-status').textContent, aiBusy: host.querySelector('#ai-correct').getAttribute('aria-busy'), keyLabel: editorOptions.keyLabel, penEnabled: editorOptions.pen.enabled, ramp: host.querySelector('#ramp').value, detectionStatus: host.querySelector('#detection-status').textContent, reportSummary: host.querySelector('#load-timings summary').textContent,
@@ -118,6 +122,7 @@ try {
 	assert.match(result.appLayout.buildTime, /^建置 \d{4}\/\d{2}\/\d{2}.+\d{2}:\d{2}:\d{2}$/); assert.equal(result.appLayout.buildIsNotLink, true);
 	assert.equal(result.appLayout.helpPath, '/help.html'); assert.equal(result.appLayout.helpIsLocal, true);
 	assert.equal(result.appLayout.workspaceSelector, true);
+	assert.equal(result.appLayout.beatClearAfterAnchor, true); assert.equal(result.appLayout.beatClearDisabledInitially, true);
 	assert.deepEqual(result.events, ['preview:shift:2', 'commit:shift:2']);
 	assert.equal(result.label, '+2.00 半音'); assert.equal(result.selection, '1.00 ~ 2.00');
 	assert.equal(result.gainVisible, true); assert.equal(result.pitchVisible, false);
@@ -129,6 +134,7 @@ try {
 	assert.equal(result.referenceName, 'Guide.wav'); assert.equal(result.referenceMuted, true); assert.equal(result.referenceGain, '-3.5 dB'); assert.equal(result.referenceOffset, '25');
 	assert.equal(result.zoomEvents.length, 1); assert.ok(result.zoomEvents[0] < 1);
 	assert.deepEqual(result.overlayEvents, ['preview:1.5', 'change:true:0:1.5']); assert.equal(result.formantValue, '+1.5');
+	assert.deepEqual(result.manualBox, { hidden: false, left: '92px', width: '23px', pointerEvents: 'none' });
 	assert.deepEqual(result.panelEvents, ['open', 'export', 'save', 'mode:1']); assert.equal(result.headerStatus, 'ready'); assert.equal(result.headerMode, true);
 	assert.deepEqual(result.aiEvents, ['strength:7', 'correct', 'discard', 'complete', 'cancel', 'settings']); assert.equal(result.aiStatus, 'ready'); assert.equal(result.aiBusy, 'true');
 	assert.deepEqual(result.optionEvents, ['key:c-major']); assert.equal(result.keyLabel, 'C 大調'); assert.equal(result.penEnabled, true);

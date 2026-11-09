@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { contextCorrectionNotes } from '../src/model/context-correction.ts';
 import { applyCorrection } from '../src/model/auto-pitch.ts';
-import { createAIRegions, regionCurves, reviewedAIRegions, syncAIRegion } from '../src/model/ai-regions.ts';
+import { createAIRegions, createManualAIRegion, manualSelectionBoundsAt, regionCurves, reviewedAIRegions, syncAIRegion } from '../src/model/ai-regions.ts';
 import { Curves, CURVE_HOP_SEC } from '../src/model/curves.ts';
 import { History } from '../src/model/history.ts';
 import { KEY_OPTIONS } from '../src/model/keys.ts';
@@ -27,6 +27,15 @@ r.feedbackType='rejected';syncAIRegion(r,after);assert.equal(r.enabled,true);ass
 const inferred={...r,feedbackType:undefined,enabled:false,edited:true};
 assert.deepEqual(reviewedAIRegions([inferred]),[],'curve state alone must not create AI feedback');
 assert.deepEqual(reviewedAIRegions([{...inferred,feedbackType:'rejected'},{...inferred,feedbackType:'adjusted'}]).map(x=>x.feedbackType),['rejected','adjusted']);
+const blocked=[{start:2,end:3},{start:5,end:7}];
+assert.deepEqual(manualSelectionBoundsAt(4,blocked,10),{start:3,end:5},'manual selection is confined between AI boxes');
+assert.deepEqual(manualSelectionBoundsAt(8,blocked,10),{start:7,end:10});
+assert.equal(manualSelectionBoundsAt(2,blocked,10),null,'AI box start is blocked');
+assert.deepEqual(manualSelectionBoundsAt(3,blocked,10),{start:3,end:5},'AI box end belongs to the next free interval');
+const manualBefore=new Curves(100),manualAfter=manualBefore.clone();manualAfter.pitch.fill(.75,20,40);
+const manualRegion=createManualAIRegion(manualBefore,manualAfter,20,40,99);
+assert.equal(manualRegion.kind,'manual');assert.equal(manualRegion.edited,true);assert.equal(manualRegion.feedbackType,'adjusted');
+assert.deepEqual(reviewedAIRegions([manualRegion]),[manualRegion],'manual yellow boxes are AI adjusted feedback');
 const history=new History();history.reset(base);history.push(base);history.push(after);history.truncate(0);
 assert.equal(history.depth,0);assert.equal(history.redoDepth,0);
 // Formant-follow 模式下，AI 以反向共振峰位移抵銷這次音高修正；voice 模式（0）不重複補償。

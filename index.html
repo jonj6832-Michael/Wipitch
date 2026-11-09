@@ -52,6 +52,9 @@
 		<button id="ai-correct" type="button" disabled>AI 檢測</button>
 		<label class="tempo-field">拍號 <select id="tempo-meter" aria-label="預設拍號"><option value="4/4">4/4</option><option value="3/4">3/4</option><option value="2/2">2/2</option></select></label>
 		<label class="tempo-field">BPM <input id="tempo-bpm" type="number" min="30" max="300" step="1" value="120" aria-label="預設 BPM"></label>
+		<label class="tempo-field" title="後續拍點允許相對前一次 BPM 偏移的範圍">容許 ±<input id="tempo-tolerance" type="number" min="1" max="25" step="1" value="5" aria-label="拍點 BPM 容許百分比">%</label>
+		<label class="tempo-field" title="候選起音相對附近背景至少要突出多少個標準差；越高越嚴格">起音突出門檻 <input id="onset-prominence" type="number" min="0.50" max="3.00" step="0.05" value="0.65" aria-label="起音突出門檻"></label>
+		<label class="tempo-field" title="候選拍點的強度、預測位置與後續節奏綜合分數；越高越容易保留綠色 X">拍點確認門檻 <input id="beat-confirmation" type="number" min="0.30" max="0.90" step="0.01" value="0.58" aria-label="拍點確認門檻"></label>
 		<button id="sync-reference" type="button" disabled aria-pressed="false" title="請先載入參考音軌">同步參考音軌</button>
 		<button id="ai-undo" type="button" disabled>放棄</button>
 		<button id="ai-clear-marks" type="button" disabled>完成工作</button>
@@ -161,7 +164,8 @@
 			<input type="range" id="ref-amp-zoom" min="0" max="1" step="0.001" value="0.2314"
 				title="參考音軌波形放大（只影響顯示）。雙擊還原（Alt+滾輪）">
 			<div id="bg-bar">
-				<button id="ref-anchor-set" type="button" title="搜尋播放紅線左右各 0.5 秒內的起音作為錨點，依 BPM 與拍號預覽前後各四小節；不需先選取範圍">⚓ 錨定</button>
+				<button id="ref-anchor-set" type="button" title="可在不同檢測範圍建立多個錨點；已有拍點的範圍會先清除再重新錨定">⚓ 錨定</button>
+				<button id="ref-beat-clear" type="button" title="清除目前檢測範圍內所有節拍標記與錨點">清除</button>
 				<span id="ref-beat-status" role="status">尚未錨定</span>
 				<label class="file" title="載入一個一起播放的參考音檔（伴奏、導唱），只用來監聽，不會匯出">
 					<span id="bg-file-text">載入參考音軌</span><input type="file" id="bg-file" accept="audio/*">

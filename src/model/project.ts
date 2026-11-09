@@ -44,9 +44,15 @@ export interface BackgroundSettings {
 	muted: boolean;
 	offsetSec: number;
 	beatAnchorSec?: number | null;
+	/** 多錨點格式；beatAnchorSec 保留供舊版專案相容。 */
+	beatAnchorSecs?: number[];
 	tempoBpm?: number;
 	tempoMeter?: string;
+	tempoTolerancePercent?: number;
+	onsetProminenceThreshold?: number;
+	beatConfirmationThreshold?: number;
 	barStartsSec?: number[];
+	virtualBarStartsSec?: number[];
 	beatRecords?: ReferenceBeatRecord[];
 }
 

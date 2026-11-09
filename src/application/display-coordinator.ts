@@ -16,8 +16,9 @@ export interface DisplayState {
 	selectedAnchors: ReadonlySet<number>;
 	aiRegions: AIRegion[];
 	pitchMidi: Float32Array | null;
-	beatAnchor: number | null;
+	beatAnchors: readonly number[];
 	barStarts: readonly number[];
+	virtualBarStarts: readonly number[];
 	bpm: number;
 	meter: string;
 	analyzedBeats: boolean;
@@ -82,12 +83,13 @@ export class DisplayCoordinator {
 		const s = p.readState();
 		const loop = p.playback.loopRegion;
 		p.waveform.draw(position, s.selection, s.curves, loop, s.renderingRange, s.selectedAnchors);
-		p.referenceWaveform.draw(position, s.selection, loop, s.beatAnchor, s.barStarts, s.bpm, s.meter, s.analyzedBeats, s.beatRecords);
+		p.referenceWaveform.draw(position, s.selection, loop, s.beatAnchors, s.barStarts, s.virtualBarStarts,
+			s.bpm, s.meter, s.analyzedBeats, s.beatRecords);
 		const curves = s.previewCurves ?? s.curves;
 		p.pianoroll.draw(position, s.selection, curves, loop, s.renderingRange, s.selectedAnchors);
 		if (curves && s.pitchMidi) {
 			p.aiOverlay.draw(s.aiRegions, curves, s.pitchMidi, p.timeToX,
-				p.pianoroll.rangeOf('pitch'), p.pitchHeight(), s.locked);
+				p.pianoroll.rangeOf('pitch'), p.pitchHeight(), s.locked, s.aiRegions.length ? s.selection : null);
 		} else {
 			p.aiOverlay.clear();
 		}

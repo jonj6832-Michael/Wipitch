@@ -16,7 +16,7 @@ export function detectReferenceRhythm(request: RhythmRequest, signal?: AbortSign
 			cleanup();
 			if (data.error) reject(new Error(data.error)); else resolve(data.result);
 		};
-		const audio = request.audio.slice(), onsets = request.onsets.slice();
-		worker.postMessage({ ...request, audio, onsets }, [audio.buffer, onsets.buffer]);
+		const audio = request.audio.slice();
+		worker.postMessage({ ...request, audio }, [audio.buffer]);
 	});
 }

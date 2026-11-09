@@ -1,7 +1,7 @@
 import { ruleMinimumDurationMs } from './model/rule-selection';
 import { installPitchBenchmark } from './application/pitch-benchmark';
 import { DisplayCoordinator } from './application/display-coordinator';
-import { createAIRegions, regionCurves, resetAIRegionToAI, reviewedAIRegions, syncAIRegion, type AIRegion } from './model/ai-regions';
+import { createAIRegions, createManualAIRegion, manualSelectionBoundsAt, regionCurves, resetAIRegionToAI, reviewedAIRegions, syncAIRegion, type AIRegion } from './model/ai-regions';
 import { AIRegionOverlay } from './ui/ai-regions';
 import { installTrainingLibrary } from './ui/training-library';
 import { prepareTrainingPair, stageTrainingPair, storeRejectedTrainingPair, resetTrainingStaging, commitTrainingStaging } from './training/recorder';
@@ -15,9 +15,10 @@ import { KEY_MODES, KEY_OPTIONS } from './model/keys';
 import { Player } from './engine/player';
 import { Renderer } from './engine/renderer';
 import { detectPitchParallel } from './analysis/pitch-parallel';
-import { createReferenceCache, findOnset, type ReferenceCache, type ReferenceRhythm } from './analysis/reference-cache';
+import { createReferenceCache, createSpectralFluxOnsets, findOnset, type ReferenceCache, type ReferenceRhythm } from './analysis/reference-cache';
 import { referenceBeatPreview } from './model/reference-beat-preview';
-import { mergeReferenceBeats, restoreReferenceBeats, shiftReferenceBeats, type ReferenceBeatRecord } from './model/reference-beat-table';
+import { clearReferenceBeatsInRange, hasReferenceBeatsInRange, mergeReferenceBeats, referenceBeatInRange, restoreReferenceBeats, shiftReferenceBeats, type ReferenceBeatRecord } from './model/reference-beat-table';
+import { referenceBeatGrid } from './model/reference-beat-grid';
 import { averageBarBpm } from './analysis/bar-tempo';
 import { detectReferenceRhythm } from './analysis/reference-rhythm';
 import { concurrentAnalysis } from './application/concurrent-analysis';
@@ -123,7 +124,7 @@ let sourceAbsolutePath: string | null = null;
 let manualBaseline: Curves | null = null;
 let aiRegions: AIRegion[] = [];
 let aiPreviewCurves: Curves | null = null;
-let aiReview: { curves: Curves; input: import('./application/ai-correction-flow').CorrectionInput; audio: Map<number, { start:number; end:number; channels: import('./types').Samples[] }>; keyLabel:string; historyDepth:number } | null = null;
+let aiReview: { curves: Curves; input: import('./application/ai-correction-flow').CorrectionInput; audio: Map<number, { start:number; end:number; channels: import('./types').Samples[] }>; keyLabel:string; historyDepth:number; referenceBeatRange: { start:number; end:number } | null } | null = null;
 
 let stagedTrainingCount = 0;
 let trainingAsset: { id: string; name: string; size: number; lastModified: number } | null = null;
@@ -474,7 +475,7 @@ function setTool(t: EditorTool) {
  */
 function syncToolbar() {
 	editorOptions.setPenVisible(!aiRegions.length && tool === 'pen');
-	inspector.setVisible(!aiRegions.length && tool === 'select' && !!selection);
+	inspector.setVisible(tool === 'select' && !!selection);
 }
 /**
  * 畫筆的抖音開關。
@@ -801,7 +802,7 @@ el.waveform.addEventListener('pointerup', async e => {
 // ── 選取、拖曳與畫筆 ────────────────────────────────────────────────────
 
 type DragMode =
-	| { kind: 'select'; anchor: number; moved: boolean }
+	| { kind: 'select'; anchor: number; moved: boolean; bounds: { start: number; end: number } }
 	| { kind: 'value'; startY: number; base: Curves; t: number; moved: boolean }
 	| { kind: 'vibrato'; startY: number; startAlpha: number; t: number; moved: boolean }
 	| { kind: 'pen'; base: Curves; startT: number; startY: number; lastT: number; lastY: number; minT: number; maxT: number };
@@ -812,11 +813,6 @@ el.pianoroll.addEventListener('pointerdown', e => {
 	const rect = el.pianoroll.getBoundingClientRect();
 	const x = e.clientX - rect.left, y = e.clientY - rect.top;
 	const t = Math.max(0, Math.min(outDuration(), view.xToTime(x)));
-	if (aiRegions.length) {
-		player.seek(t);
-		hint('AI 修音審核中：請直接在黃色框內上下拖曳調整音高');
-		return;
-	}
 
 	if (tool === 'pen') {
 		drag = { kind: 'pen', base: curves.clone(), startT: t, startY: y, lastT: t, lastY: y, minT: t, maxT: t };
@@ -829,7 +825,11 @@ el.pianoroll.addEventListener('pointerdown', e => {
 		// 沒有上下拖動就放開 = 定位播放頭
 		drag = { kind: 'value', startY: y, base: curves.clone(), t, moved: false };
 	} else {
-		drag = { kind: 'select', anchor: t, moved: false };
+		const bounds = aiRegions.length ? manualSelectionBoundsAt(t, aiRegions.map(region => ({
+			start: toOut(Curves.frameToTime(region.from)), end: toOut(Curves.frameToTime(region.to)),
+		})), outDuration()) : { start: 0, end: outDuration() };
+		if (!bounds) { player.seek(t); hint('這裡是既有 AI 黃框；請在黃框內直接調整，或從框外拖曳建立人工黃框'); return; }
+		drag = { kind: 'select', anchor: t, moved: false, bounds };
 	}
 	el.pianoroll.setPointerCapture(e.pointerId);
 });
@@ -842,10 +842,11 @@ el.pianoroll.addEventListener('pointermove', e => {
 	const t = Math.max(0, Math.min(outDuration(), view.xToTime(x)));
 
 	if (drag.kind === 'select') {
+		const boundedT = Math.max(drag.bounds.start, Math.min(drag.bounds.end, t));
 		// 動了才算是在拉選取範圍。沒動的話放開時只是移動播放頭，選取要留著。
-		if (Math.abs(t - drag.anchor) >= 0.01) drag.moved = true;
+		if (Math.abs(boundedT - drag.anchor) >= 0.01) drag.moved = true;
 		if (!drag.moved) return;
-		selection = { start: Math.min(drag.anchor, t), end: Math.max(drag.anchor, t) };
+		selection = { start: Math.min(drag.anchor, boundedT), end: Math.max(drag.anchor, boundedT) };
 		hint(`選取 ${fmtTime(selection.start)} ~ ${fmtTime(selection.end)}（${(selection.end - selection.start).toFixed(2)}s）`);
 	} else if (drag.kind === 'pen') {
 		if (e.shiftKey) {
@@ -1022,7 +1023,7 @@ function resetParams() {
  * 回不到原樣（舊版的問題）。全部參數都中性時，結果逐位元等於 selBase。
  */
 function applyParams() {
-	if (!curves || !selBase || !selection || workState.blocksEditing || aiRegions.length) return;
+	if (!curves || !selBase || !selection || workState.blocksEditing) return;
 	curves.pitch.set(selBase.pitch);
 	curves.gainDb.set(selBase.gainDb);
 	curves.formant.set(selBase.formant);
@@ -1061,7 +1062,7 @@ function editRange(base: Curves, fromOut: number, toOut_: number): { from: numbe
 
 // 顯示模組只發出意圖；提交、復原紀錄與算繪仍由應用層統一處理。
 async function commitInspectorParam(key: EditParamKey, label: string) {
-	if (!curves || !selBase || !selection || workState.blocksEditing || aiRegions.length) return;
+	if (!curves || !selBase || !selection || workState.blocksEditing) return;
 	applyParams();
 	if (!sessionPushed) {
 		if (sameCurves(selBase, curves)) return;
@@ -1092,7 +1093,7 @@ async function setMode(follow: 0 | 1) {
 }
 // 把選取範圍的編輯清掉，回到原始聲音
 async function resetSelectionLane(which: LaneId | 'all') {
-		if (!curves || !selection || workState.blocksEditing || aiRegions.length) return;
+		if (!curves || !selection || workState.blocksEditing) return;
 		const before = curves.clone();
 		// 只歸零曲線數值；錨點與伸縮不動。範圍換到原始時間，因為曲線存在那裡
 		const s = srcSel()!;
@@ -1188,7 +1189,14 @@ function saveProject() {
 	}
 	const name = source.name.replace(/\.[^.]+$/, '') + '.wipitch.json';
 	const text = serialize(curves, source.name, sourceAbsolutePath, source.sampleRate, source.duration, renderer.formantFollow,
-		ref.name ? { name: ref.name, gainDb: ref.gainDb, muted: ref.muted, offsetSec: ref.offsetSec, beatAnchorSec: ref.beatAnchorSec, tempoBpm: Number(tempoBpm.value), tempoMeter: tempoMeter.value, barStartsSec: syncedReferenceRhythm?.barStartsSec ?? [], beatRecords: referenceBeatRecords } : undefined);
+		ref.name ? { name: ref.name, gainDb: ref.gainDb, muted: ref.muted, offsetSec: ref.offsetSec,
+			beatAnchorSec: ref.beatAnchorSec ?? ref.beatAnchorSecs.at(-1) ?? null, beatAnchorSecs: ref.beatAnchorSecs,
+			tempoBpm: Number(tempoBpm.value),
+			tempoMeter: tempoMeter.value, tempoTolerancePercent: Number(tempoTolerance.value),
+			onsetProminenceThreshold: Number(onsetProminence.value),
+			beatConfirmationThreshold: Number(beatConfirmation.value),
+			barStartsSec: referenceBarStarts, virtualBarStartsSec: referenceVirtualBarStarts,
+			beatRecords: referenceBeatRecords } : undefined);
 	downloadBlob(new Blob([text], { type: 'application/json' }), name);
 	hint(`已存檔 ${name}`);
 	}
@@ -1232,11 +1240,20 @@ async function openProject(f: File) {
 		if (bgSaved && bgSaved.name === ref.name) {
 			// 同一個背景已經載入了，直接套用設定
 			ref.gainDb = bgSaved.gainDb; ref.muted = bgSaved.muted; ref.offsetSec = bgSaved.offsetSec;
-			ref.beatAnchorSec = bgSaved.beatAnchorSec ?? null;
+			restoreReferenceAnchors(bgSaved);
 			referenceBarStarts = bgSaved.barStartsSec?.filter(Number.isFinite) ?? [];
+			referenceVirtualBarStarts = bgSaved.virtualBarStartsSec?.filter(Number.isFinite) ?? [];
 			referenceBeatRecords = restoreReferenceBeats(bgSaved.beatRecords);
+			referenceBeatsCommitted = referenceBeatRecords.length > 0;
 			if (bgSaved.tempoBpm) tempoBpm.value = String(bgSaved.tempoBpm);
 			if (bgSaved.tempoMeter) tempoMeter.value = bgSaved.tempoMeter;
+			if (bgSaved.tempoTolerancePercent) tempoTolerance.value = String(bgSaved.tempoTolerancePercent);
+			if (bgSaved.onsetProminenceThreshold) onsetProminence.value = String(bgSaved.onsetProminenceThreshold);
+			if (bgSaved.beatConfirmationThreshold) beatConfirmation.value = String(bgSaved.beatConfirmationThreshold);
+			if (ref.beatAnchorSec !== null && referenceBarStarts.length) syncedReferenceRhythm = {
+				bpm: Number(tempoBpm.value), meter: tempoMeter.value, anchorSec: ref.beatAnchorSec,
+				barStartsSec: [...referenceBarStarts], virtualBarStartsSec: [...referenceVirtualBarStarts],
+			};
 			applyRefToPlayer();
 		} else if (bgSaved) {
 			pendingRefSettings = bgSaved;
@@ -1282,6 +1299,7 @@ async function rerender(fromSec: number, toSec: number, label: string, manualRan
  const changedPitch = before && !sameArray(before.pitch, curves.pitch);
  const exceedsTrainingLimit = !!manualRange && manualRange.end - manualRange.start > 5;
  const touchesAI = !!manualRange && !!curves && aiRegions.some(r => toOut(Curves.frameToTime(r.from)) < manualRange.end && toOut(Curves.frameToTime(r.to)) > manualRange.start);
+ const createsManualAIRegion = !!(aiReview && manualRange && !touchesAI && changedPitch);
  const capture = !!(manualRange && !touchesAI && !exceedsTrainingLimit && trainingAsset && changedPitch && clipEnd > clipStart && source && pitchMidi && curveVoiced);
  const cut = () => renderer.rendered.map(channel => channel.slice(Math.round(clipStart * sr), Math.round(clipEnd * sr)));
  const beforeAudio = capture ? cut() : [];
@@ -1307,10 +1325,20 @@ async function rerender(fromSec: number, toSec: number, label: string, manualRan
 		player.setAudio(renderer.rendered, renderer.sampleRate);
   manualBaseline = curves.clone();
   for(const region of aiRegions) { syncAIRegion(region, curves); if(manualRange && region.edited && toOut(Curves.frameToTime(region.from)) < manualRange.end && toOut(Curves.frameToTime(region.to)) > manualRange.start) region.feedbackKey=keySelection; }
-  if (manualRange && changedPitch && exceedsTrainingLimit) {
+  if(createsManualAIRegion&&before&&manualRange&&aiReview){
+   const from=Curves.timeToFrame(toSrc(manualRange.start)),to=Curves.timeToFrame(toSrc(manualRange.end));
+   const nextId=aiRegions.reduce((id,region)=>Math.max(id,region.id+1),0);
+   const region=createManualAIRegion(before,afterCurves,from,to,nextId);region.feedbackKey=keySelection;
+   aiRegions.push(region);
+   if(capture)aiReview.audio.set(region.id,{start:clipStart,end:clipEnd,channels:beforeAudio});
+   trainingStatus.textContent=exceedsTrainingLimit
+    ? '人工黃框已建立；範圍超過 5 秒，完成工作時會依既有黃框規則略過訓練資料'
+    : '人工黃框已建立；完成工作時會與其他人工調整黃框一起保存為 AI 訓練資料';
+  }
+  if (manualRange && changedPitch && exceedsTrainingLimit && !createsManualAIRegion) {
    trainingStatus.textContent = '本次修改範圍超過 5 秒，不記錄訓練資料；修音已完成';
   }
-  if (capture) {
+  if (capture&&!createsManualAIRegion) {
    trainingStatus.textContent = '手動修音記錄：正在暫存本次修改…';
    try {
     const pair = await prepareTrainingPair({ before: before!, after: afterCurves, beforeAudio, afterAudio: cut(),
@@ -1515,7 +1543,7 @@ el.refAmpZoom.value = String(ampToFraction(1));
 el.refAmpZoom.addEventListener('input', () => setRefAmpZoom(fractionToAmp(parseFloat(el.refAmpZoom.value))));
 el.refAmpZoom.addEventListener('dblclick', () => setRefAmpZoom(1));
 
-let refBeatDrag: { pointerId: number; firstBeatSec: number; original: ReferenceBeatRecord[]; bars: number[]; anchor: number | null; startTime: number } | null = null;
+let refBeatDrag: { pointerId: number; firstBeatSec: number; original: ReferenceBeatRecord[]; bars: number[]; virtualBars: number[]; anchors: number[]; startTime: number } | null = null;
 // 參考音軌底部的紅色第一拍可拖動；其他位置維持既有選取／定位操作。
 el.refwave.addEventListener('pointerdown', e => {
 	if (!source) return;
@@ -1529,7 +1557,7 @@ el.refwave.addEventListener('pointerdown', e => {
 		}
 		if (firstBeatSec !== null) {
 			refBeatDrag = { pointerId: e.pointerId, firstBeatSec, original: referenceBeatRecords,
-				bars: [...referenceBarStarts], anchor: ref.beatAnchorSec, startTime: t };
+				bars: [...referenceBarStarts], virtualBars: [...referenceVirtualBarStarts], anchors: [...ref.beatAnchorSecs], startTime: t };
 			el.refwave.setPointerCapture(e.pointerId);
 			return;
 		}
@@ -1556,7 +1584,9 @@ el.refwave.addEventListener('pointermove', e => {
 		const shift = Math.max(minimum, Math.min(maximum, t - drag.startTime));
 		referenceBeatRecords = shiftReferenceBeats(drag.original, shift, drag.firstBeatSec - 0.001);
 		referenceBarStarts = drag.bars.map(bar => bar >= drag.firstBeatSec - 0.001 ? bar + shift : bar);
-		ref.beatAnchorSec = drag.anchor !== null && drag.anchor >= drag.firstBeatSec - 0.001 ? drag.anchor + shift : drag.anchor;
+		referenceVirtualBarStarts = drag.virtualBars.map(bar => bar >= drag.firstBeatSec - 0.001 ? bar + shift : bar);
+		ref.beatAnchorSecs = drag.anchors.map(anchor => anchor >= drag.firstBeatSec - 0.001 ? anchor + shift : anchor);
+		ref.beatAnchorSec = referenceAnchorInRange(currentDetectionRange()) ?? ref.beatAnchorSecs.at(-1) ?? null;
 		hint(`第一拍偏移 ${shift >= 0 ? '+' : ''}${Math.round(shift * 1000)} ms；後續拍點同步調整`);
 		return;
 	}
@@ -1567,7 +1597,8 @@ el.refwave.addEventListener('pointerup', e => {
 		refBeatDrag = null;
 		el.refwave.releasePointerCapture(e.pointerId);
 		if (syncedReferenceRhythm) syncedReferenceRhythm = { ...syncedReferenceRhythm,
-			anchorSec: ref.beatAnchorSec ?? syncedReferenceRhythm.anchorSec, barStartsSec: [...referenceBarStarts] };
+			anchorSec: ref.beatAnchorSec ?? syncedReferenceRhythm.anchorSec, barStartsSec: [...referenceBarStarts],
+			virtualBarStartsSec: [...referenceVirtualBarStarts] };
 		const average = averageBarBpm(referenceBarStarts, Number(tempoBpm.value), tempoMeter.value);
 		if (average !== null && !averageBpmOutput.hidden) averageBpmOutput.textContent = `範圍平均 BPM ${average.toFixed(1)}`;
 		return;
@@ -1577,8 +1608,10 @@ el.refwave.addEventListener('pointerup', e => {
 el.refwave.addEventListener('pointercancel', e => {
 	if (refBeatDrag?.pointerId !== e.pointerId) return;
 	referenceBarStarts = refBeatDrag.bars;
+	referenceVirtualBarStarts = refBeatDrag.virtualBars;
 	referenceBeatRecords = refBeatDrag.original;
-	ref.beatAnchorSec = refBeatDrag.anchor;
+	ref.beatAnchorSecs = refBeatDrag.anchors;
+	ref.beatAnchorSec = referenceAnchorInRange(currentDetectionRange()) ?? ref.beatAnchorSecs.at(-1) ?? null;
 	refBeatDrag = null;
 });
 
@@ -1587,11 +1620,13 @@ el.refwave.addEventListener('pointercancel', e => {
 // 修主唱時一邊聽伴奏才知道對不對得準。只用來監聽：不跟著錨點伸縮、不會匯出。
 // 存檔只記設定，讀檔後請使用者重新載入同名檔。
 
-const ref = { name: null as string | null, gainDb: 0, muted: false, offsetSec: 0, beatAnchorSec: null as number | null };
+const ref = { name: null as string | null, gainDb: 0, muted: false, offsetSec: 0,
+	beatAnchorSec: null as number | null, beatAnchorSecs: [] as number[] };
 let referenceCache: ReferenceCache | null = null;
 let rhythmGeneration = 0;
 let referenceSyncEnabled = false;
 let referenceBarStarts: number[] = [];
+let referenceVirtualBarStarts: number[] = [];
 let referenceBeatRecords: ReferenceBeatRecord[] = [];
 let referenceBeatsCommitted = false;
 let lastReferenceAnalysisRange: { start: number; end: number } | null = null;
@@ -1599,36 +1634,161 @@ let refAudio: { channels: Float32Array[]; sampleRate: number } | null = null;
 let syncedReferenceRhythm: ReferenceRhythm | null = null;
 const averageBpmOutput = document.getElementById('ref-average-bpm') as HTMLOutputElement;
 const anchorButton = document.getElementById('ref-anchor-set') as HTMLButtonElement;
+const clearBeatButton = document.getElementById('ref-beat-clear') as HTMLButtonElement;
+
+function currentDetectionRange(): { start: number; end: number } | null {
+	const range = detectionBar.range;
+	return range && range.end > range.start ? range : null;
+}
+
+function referenceAnchorInRange(range: { start: number; end: number } | null): number | null {
+	if (!range) return null;
+	return ref.beatAnchorSecs.find(anchor => referenceBeatInRange(anchor, range)) ?? null;
+}
+
+function setReferenceAnchor(range: { start: number; end: number }, anchor: number): void {
+	ref.beatAnchorSecs = ref.beatAnchorSecs.filter(previous => !referenceBeatInRange(previous, range));
+	ref.beatAnchorSecs.push(anchor);
+	ref.beatAnchorSecs.sort((a, b) => a - b);
+	ref.beatAnchorSec = anchor;
+}
+
+function clearReferenceAnchors(range: { start: number; end: number }): void {
+	ref.beatAnchorSecs = ref.beatAnchorSecs.filter(anchor => !referenceBeatInRange(anchor, range));
+	ref.beatAnchorSec = referenceAnchorInRange(currentDetectionRange()) ?? ref.beatAnchorSecs.at(-1) ?? null;
+}
+
+function restoreReferenceAnchors(settings: BackgroundSettings): void {
+	const multiple = Array.isArray(settings.beatAnchorSecs) ? settings.beatAnchorSecs.filter(Number.isFinite) : [];
+	const saved = multiple.length ? multiple
+		: (Number.isFinite(settings.beatAnchorSec) ? [settings.beatAnchorSec as number] : []);
+	ref.beatAnchorSecs = [...new Set(saved)].sort((a, b) => a - b);
+	ref.beatAnchorSec = referenceAnchorInRange(currentDetectionRange()) ?? ref.beatAnchorSecs.at(-1) ?? null;
+}
+
+function hasReferenceBeatMarkers(range: { start: number; end: number }): boolean {
+	if (hasReferenceBeatsInRange(referenceBeatRecords, range)) return true;
+	if (referenceBeatsCommitted) return false;
+	return referenceBeatGrid(referenceBarStarts, Number(tempoBpm.value), tempoMeter.value)
+		.some(marker => referenceBeatInRange(marker.time, range));
+}
+
+/** 清除持久拍點與目前預覽／分析結果；持久資料只刪除 [start,end) 內的列。 */
+function clearReferenceBeatRange(range: { start: number; end: number }): number {
+	const before = referenceBeatRecords.length;
+	referenceBeatRecords = clearReferenceBeatsInRange(referenceBeatRecords, range);
+	clearReferenceAnchors(range);
+	++rhythmGeneration;
+	referenceBarStarts = [];
+	referenceVirtualBarStarts = [];
+	referenceBeatsCommitted = false;
+	syncedReferenceRhythm = null;
+	lastReferenceAnalysisRange = null;
+	averageBpmOutput.hidden = true;
+	averageBpmOutput.textContent = '';
+	document.getElementById('ref-beat-status')!.textContent = referenceBeatRecords.length
+		? `已記錄 ${referenceBeatRecords.length} 拍 · 目前範圍已清除`
+		: '目前檢測範圍的節拍已清除';
+	syncRefUi();
+	return before - referenceBeatRecords.length;
+}
+
+/** 放棄 AI 結果時，只移除該次同步分析產生的拍點，不移除使用者設定的錨點。 */
+function clearAIReferenceBeatRange(range: { start: number; end: number } | null): number {
+	if (!range) return 0;
+	const before = referenceBeatRecords.length;
+	referenceBeatRecords = clearReferenceBeatsInRange(referenceBeatRecords, range);
+	++rhythmGeneration;
+	referenceBarStarts = referenceBarStarts.filter(time => !referenceBeatInRange(time, range));
+	referenceVirtualBarStarts = referenceVirtualBarStarts.filter(time => !referenceBeatInRange(time, range));
+	referenceBeatsCommitted = referenceBeatRecords.length > 0;
+	syncedReferenceRhythm = null;
+	if (lastReferenceAnalysisRange?.start === range.start && lastReferenceAnalysisRange.end === range.end) {
+		lastReferenceAnalysisRange = null;
+	}
+	averageBpmOutput.hidden = true;
+	averageBpmOutput.textContent = '';
+	const removed = before - referenceBeatRecords.length;
+	document.getElementById('ref-beat-status')!.textContent = referenceBeatRecords.length
+		? `已記錄 ${referenceBeatRecords.length} 拍 · 本次 AI 拍點已清除`
+		: '本次 AI 檢測產生的拍點已清除';
+	syncRefUi();
+	return removed;
+}
+
 anchorButton.addEventListener('click', () => {
-	if (!referenceCache || workState.isBusy) { hint('請先載入參考音軌並等待工作完成'); return; }
+	if (!referenceCache || workState.blocksEditing) { hint('請先載入參考音軌並等待前景工作完成'); return; }
+	const range = currentDetectionRange();
+	if (!range) { hint('請先在檢測列標示要錨定的範圍'); return; }
 	const redline = player.position;
-	const onset = findOnset(referenceCache, redline - ref.offsetSec, 0.5);
-	ref.beatAnchorSec = onset === null ? redline : onset + ref.offsetSec;
+	if (!referenceBeatInRange(redline, range)) { hint('請先把播放紅線移到檢測範圍內再錨定'); return; }
+	let replaced = false;
+	if (hasReferenceBeatMarkers(range)) {
+		clearReferenceBeatRange(range);
+		replaced = true;
+	}
+	const referenceTime = redline - ref.offsetSec;
+	const localStart = Math.max(0, referenceTime - 0.7), localEnd = Math.min(referenceCache.duration, referenceTime + 0.7);
+	const localAudio = referenceCache.mono16k.slice(Math.floor(localStart * 16000), Math.ceil(localEnd * 16000));
+	const localCache: ReferenceCache = { mono16k: localAudio, onsets: createSpectralFluxOnsets(localAudio), duration: localAudio.length / 16000 };
+	const localOnset = findOnset(localCache, referenceTime - localStart, 0.5, 0, localCache.duration,
+		Number(onsetProminence.value), Number(beatConfirmation.value));
+	const onset = localOnset === null ? null : localOnset + localStart;
+	const snapped = onset === null ? redline : onset + ref.offsetSec;
+	setReferenceAnchor(range, referenceBeatInRange(snapped, range) ? snapped : redline);
 	rebuildReferenceBars();
 	syncRefUi();
-	hint(onset === null
-		? '紅線左右 0.5 秒內未找到明確起音，暫以紅線錨定並預覽前後四小節'
-		: `已吸附附近起音 ${fmtTime(ref.beatAnchorSec)}；黃三角為 BPM 前後四小節預覽，不需選取檢測範圍`);
+	hint(`${replaced ? '已清除檢測範圍原有拍點並重新錨定；' : ''}${onset === null
+		? '紅線左右 0.5 秒內未找到明確起音，暫以紅線錨定'
+		: `已吸附附近起音 ${fmtTime(ref.beatAnchorSec!)}`}（目前共 ${ref.beatAnchorSecs.length} 個錨點）`);
+});
+clearBeatButton.addEventListener('click', () => {
+	const range = currentDetectionRange();
+	if (!range) { hint('請先在檢測列標示要清除的範圍'); return; }
+	if (!hasReferenceBeatMarkers(range)) { hint('目前檢測範圍沒有節拍標記'); return; }
+	const removed = clearReferenceBeatRange(range);
+	hint(`已清除檢測範圍內所有節拍標記與錨點（三角形與綠色 X）${removed ? `（${removed} 筆資料）` : '（預覽）'}`);
 });
 const syncButton = document.getElementById('sync-reference') as HTMLButtonElement;
 const tempoBpm = document.getElementById('tempo-bpm') as HTMLInputElement;
 const tempoMeter = document.getElementById('tempo-meter') as HTMLSelectElement;
+const tempoTolerance = document.getElementById('tempo-tolerance') as HTMLInputElement;
+const onsetProminence = document.getElementById('onset-prominence') as HTMLInputElement;
+const beatConfirmation = document.getElementById('beat-confirmation') as HTMLInputElement;
 tempoBpm.addEventListener('change', rebuildReferenceBars);
 tempoMeter.addEventListener('change', rebuildReferenceBars);
+tempoTolerance.addEventListener('change', () => {
+	const value = Math.max(1, Math.min(25, Number(tempoTolerance.value) || 5));
+	tempoTolerance.value = String(value);
+});
+onsetProminence.addEventListener('change', () => {
+	const value = Math.max(0.5, Math.min(3, Number(onsetProminence.value) || 0.65));
+	onsetProminence.value = value.toFixed(2);
+});
+beatConfirmation.addEventListener('change', () => {
+	const value = Math.max(0.3, Math.min(0.9, Number(beatConfirmation.value) || 0.58));
+	beatConfirmation.value = value.toFixed(2);
+});
 function rebuildReferenceBars() {
 	++rhythmGeneration;
 	referenceBarStarts = [];
+	referenceVirtualBarStarts = [];
 	referenceBeatsCommitted = false;
 	syncedReferenceRhythm = null;
 	averageBpmOutput.hidden = true;
 	averageBpmOutput.textContent = '';
+	const range = currentDetectionRange();
+	const rangeAnchor = referenceAnchorInRange(range);
+	ref.beatAnchorSec = rangeAnchor;
 	document.getElementById('ref-beat-status')!.textContent = !ref.name ? '尚未載入參考音軌'
-		: `${referenceBeatRecords.length ? `已記錄 ${referenceBeatRecords.length} 拍 · ` : ''}${ref.beatAnchorSec === null ? '尚未錨定' : 'BPM 預覽 · 前後各 4 小節'}`;
-	if (!referenceCache || ref.beatAnchorSec === null) return;
+		: `${referenceBeatRecords.length ? `已記錄 ${referenceBeatRecords.length} 拍 · ` : ''}${ref.beatAnchorSecs.length ? `${ref.beatAnchorSecs.length} 個錨點` : '尚未錨定'}${rangeAnchor === null ? '' : ' · BPM 預覽'}`;
+	if (!referenceCache || rangeAnchor === null || !range
+		|| hasReferenceBeatsInRange(referenceBeatRecords, range)) { syncReferenceButton(); return; }
 	const bpm = Number(tempoBpm.value);
-	if (!Number.isFinite(bpm) || bpm < 30 || bpm > 300) return;
-	referenceBarStarts = referenceBeatPreview(ref.beatAnchorSec, bpm, tempoMeter.value,
-		Math.max(0, ref.offsetSec), referenceCache.duration + ref.offsetSec);
+	if (!Number.isFinite(bpm) || bpm < 30 || bpm > 300) { syncReferenceButton(); return; }
+	referenceBarStarts = referenceBeatPreview(rangeAnchor, bpm, tempoMeter.value,
+		Math.max(range.start, 0, ref.offsetSec), Math.min(range.end, referenceCache.duration + ref.offsetSec));
+	syncReferenceButton();
 }
 syncButton.addEventListener('click', () => {
 	if (syncButton.disabled) return;
@@ -1638,16 +1798,27 @@ syncButton.addEventListener('click', () => {
 });
 async function analyzeSynchronizedTracks(): Promise<boolean> {
 	if (workState.isBusy) return false;
-	if (!refAudio || ref.beatAnchorSec === null) { hint('請載入參考音軌，並先設定節拍錨點'); return false; }
 	const selectedRange = detectionBar.range;
 	if (!selectedRange || selectedRange.end <= selectedRange.start) { hint('請先在檢測列標示反白範圍'); return false; }
 	const range = { ...selectedRange };
+	const rangeAnchor = referenceAnchorInRange(range);
+	if (!refAudio || rangeAnchor === null) { hint('請先在目前檢測範圍內設定節拍錨點'); return false; }
+	if (hasReferenceBeatsInRange(referenceBeatRecords, range)) {
+		hint('檢測範圍已有節拍標記；請先按「清除」或改選沒有節拍資料的範圍');
+		return false;
+	}
 	if (!referenceCache) return false;
 	const a = Math.max(0, Math.ceil((range.start - ref.offsetSec) * 100) / 100);
 	const b = Math.min(referenceCache.duration, range.end - ref.offsetSec);
 	if (b <= a) { hint('檢測範圍與參考音軌沒有重疊'); return false; }
 	const rough = Number(tempoBpm.value);
 	if (!Number.isFinite(rough) || rough < 30 || rough > 300) { hint('BPM 請輸入 30～300'); return false; }
+	const tolerancePercent = Math.max(1, Math.min(25, Number(tempoTolerance.value) || 5));
+	tempoTolerance.value = String(tolerancePercent);
+	const prominenceThreshold = Math.max(0.5, Math.min(3, Number(onsetProminence.value) || 0.65));
+	const confirmationThreshold = Math.max(0.3, Math.min(0.9, Number(beatConfirmation.value) || 0.58));
+	onsetProminence.value = prominenceThreshold.toFixed(2);
+	beatConfirmation.value = confirmationThreshold.toFixed(2);
 	const audio = referenceCache.mono16k.slice(Math.ceil(a * 16000), Math.floor(b * 16000));
 	if (!source || !curves || !track) { hint('請先載入主音軌'); return false; }
 	const task = workState.tryBegin('reference', '並行分析主音高、參考音高與節拍');
@@ -1657,7 +1828,7 @@ async function analyzeSynchronizedTracks(): Promise<boolean> {
 	const mainSource = source, mainTrack = track;
 	const srcStart = curves.timeMap.outToSrc(range.start), srcEnd = curves.timeMap.outToSrc(range.end);
 	const mainStart = Math.floor(srcStart * 16000 / 256) * 256 / 16000;
-	const offset = ref.offsetSec, anchorSec = ref.beatAnchorSec, meter = tempoMeter.value;
+	const offset = ref.offsetSec, anchorSec = rangeAnchor, meter = tempoMeter.value;
 	const mode = computeControl.mode;
 	const workerLimit = Math.max(1, Math.floor(availableParallelWorkers(mode === 'gpu' ? 'gpu' : 'cpu') / 2));
 	const mainTask = workState.begin('main-pitch', '主音軌：準備多 Worker 音高分析');
@@ -1678,23 +1849,26 @@ async function analyzeSynchronizedTracks(): Promise<boolean> {
 			},
 			rhythm: async () => {
 				try { return await detectReferenceRhythm({ audio,
-					onsets: referenceCache!.onsets.slice(Math.round(a * 100), Math.floor(b * 100)),
-					anchorSec: anchorSec - offset - a, bpm: rough, meter, estimate: true,
+					anchorSec: anchorSec - offset - a, bpm: rough, meter, bpmTolerance: tolerancePercent / 100,
+					onsetProminence: prominenceThreshold, confirmationThreshold,
 				}); } finally { rhythmTask.finish('節拍追蹤工作結束'); }
 			},
 		});
 		if (generation !== rhythmGeneration) return false;
 		tempoBpm.value = String(result.rhythm.bpm);
-		ref.beatAnchorSec = result.rhythm.anchorSec + offset + a;
+		const analyzedAnchor = result.rhythm.anchorSec + offset + a;
+		setReferenceAnchor(range, analyzedAnchor);
 		referenceBarStarts = result.rhythm.barStartsSec.map(t => t + offset + a);
-		syncedReferenceRhythm = { bpm: result.rhythm.bpm, meter, anchorSec: ref.beatAnchorSec, barStartsSec: [...referenceBarStarts] };
+		referenceVirtualBarStarts = result.rhythm.virtualBarStartsSec.map(t => t + offset + a);
+		syncedReferenceRhythm = { bpm: result.rhythm.bpm, meter, anchorSec: analyzedAnchor, barStartsSec: [...referenceBarStarts],
+			virtualBarStartsSec: [...referenceVirtualBarStarts] };
 		lastReferenceAnalysisRange = range;
 		const average = averageBarBpm(referenceBarStarts, result.rhythm.bpm, meter);
 		averageBpmOutput.textContent = average === null
-			? `範圍估計 BPM ${result.rhythm.bpm.toFixed(1)}`
+			? `初始 BPM ${result.rhythm.bpm.toFixed(1)}`
 			: `範圍平均 BPM ${average.toFixed(1)}`;
 		averageBpmOutput.hidden = false;
-		document.getElementById('ref-beat-status')!.textContent = `已分析 · ${referenceBarStarts.length} 個小節起點`;
+		document.getElementById('ref-beat-status')!.textContent = `已分析 · BPM ±${tolerancePercent}% · 突出 ${prominenceThreshold.toFixed(2)} · 確認 ${confirmationThreshold.toFixed(2)} · ${referenceBarStarts.length} 個小節起點 · ${referenceVirtualBarStarts.length} 個虛擬拍點`;
 		{
 			const track = result.referencePitch;
 			const pitch: { timeSec: number; midi: number }[] = [];
@@ -1740,13 +1914,16 @@ const referenceControls = new ReferenceTrackControlsView(document.getElementById
 	changeOffset: offsetSec => {
 		const shift = offsetSec - ref.offsetSec;
 		ref.offsetSec = offsetSec;
-		if (ref.beatAnchorSec !== null) ref.beatAnchorSec += shift;
+		ref.beatAnchorSecs = ref.beatAnchorSecs.map(anchor => anchor + shift);
+		ref.beatAnchorSec = referenceAnchorInRange(currentDetectionRange()) ?? ref.beatAnchorSecs.at(-1) ?? null;
 		referenceBeatRecords = shiftReferenceBeats(referenceBeatRecords, shift);
 		if (syncedReferenceRhythm) syncedReferenceRhythm = { ...syncedReferenceRhythm,
 			anchorSec: syncedReferenceRhythm.anchorSec + shift,
 			barStartsSec: syncedReferenceRhythm.barStartsSec.map(t => t + shift),
+			virtualBarStartsSec: syncedReferenceRhythm.virtualBarStartsSec?.map(t => t + shift),
 			pitch: syncedReferenceRhythm.pitch?.map(point => ({ ...point, timeSec: point.timeSec + shift })),
 		};
+		referenceVirtualBarStarts = referenceVirtualBarStarts.map(t => t + shift);
 		rebuildReferenceBars();
 		applyRefToPlayer();
 		hint(`參考音軌 offset ${Math.round(ref.offsetSec * 1000)}ms`);
@@ -1764,14 +1941,24 @@ function applyRefToPlayer() {
 function syncRefUi() {
 	referenceControls.render(ref);
 	syncReferenceButton();
-	anchorButton.classList.toggle('set', ref.beatAnchorSec !== null);
+	anchorButton.classList.toggle('set', ref.beatAnchorSecs.length > 0);
 }
 function syncReferenceButton() {
 	syncButton.disabled = !ref.name || !referenceCache || workState.isBusy;
+	const range = currentDetectionRange();
+	anchorButton.disabled = !ref.name || !referenceCache || workState.blocksEditing || !range;
+	clearBeatButton.disabled = !ref.name || !referenceCache || workState.blocksEditing || !range || !hasReferenceBeatMarkers(range);
+	anchorButton.title = !ref.name || !referenceCache ? '請先載入參考音軌' : workState.blocksEditing ? '請等待目前前景工作完成'
+		: !range ? '請先在檢測列標示範圍' : '在播放紅線附近新增錨點；若範圍已有拍點，先清除整個範圍再重新錨定';
+	clearBeatButton.title = !ref.name || !referenceCache ? '請先載入參考音軌' : workState.blocksEditing ? '請等待目前前景工作完成'
+		: !range ? '請先在檢測列標示範圍' : hasReferenceBeatMarkers(range) ? '清除目前檢測範圍內所有節拍標記與錨點' : '目前檢測範圍沒有節拍標記';
 	syncButton.setAttribute('aria-pressed', String(referenceSyncEnabled));
 	syncButton.classList.toggle('on', referenceSyncEnabled);
 	tempoBpm.disabled = workState.isBusy;
 	tempoMeter.disabled = workState.isBusy;
+	tempoTolerance.disabled = workState.isBusy;
+	onsetProminence.disabled = workState.isBusy;
+	beatConfirmation.disabled = workState.isBusy;
 	syncButton.title = !ref.name || !referenceCache ? '請先載入參考音軌' : workState.isBusy ? '請等待目前工作完成' : '切換是否在 AI 檢測時一併分析參考音軌';
 }
 
@@ -1780,6 +1967,7 @@ async function loadReference(file: File) {
 	if (!progress) { hint('目前工作尚未完成，請稍後載入參考音軌。'); return; }
 	hint(`載入參考音軌 ${file.name}…`);
 	try {
+		let restoredBeatState = false;
 		const audio = await decodeAudio(file, (stage, fraction) => progress.update(`參考音軌：${stage}`, fraction));
 
 		player.setBackground(audio.channels, audio.sampleRate);
@@ -1789,25 +1977,41 @@ async function loadReference(file: File) {
 		++rhythmGeneration;
 		referenceSyncEnabled = false;
 		referenceBarStarts = [];
+		referenceVirtualBarStarts = [];
 		referenceBeatRecords = [];
+		referenceBeatsCommitted = false;
 		lastReferenceAnalysisRange = null;
 		ref.name = audio.name;
 		ref.beatAnchorSec = null;
+		ref.beatAnchorSecs = [];
 		syncedReferenceRhythm = null;
 		if (pendingRefSettings && pendingRefSettings.name === audio.name) {
 			ref.gainDb = pendingRefSettings.gainDb;
 			ref.muted = pendingRefSettings.muted;
 			ref.offsetSec = pendingRefSettings.offsetSec;
-			ref.beatAnchorSec = pendingRefSettings.beatAnchorSec ?? null;
+			restoreReferenceAnchors(pendingRefSettings);
 			referenceBarStarts = pendingRefSettings.barStartsSec?.filter(Number.isFinite) ?? [];
+			referenceVirtualBarStarts = pendingRefSettings.virtualBarStartsSec?.filter(Number.isFinite) ?? [];
 			referenceBeatRecords = restoreReferenceBeats(pendingRefSettings.beatRecords);
+			referenceBeatsCommitted = referenceBeatRecords.length > 0;
+			restoredBeatState = referenceBarStarts.length > 0 || referenceBeatRecords.length > 0;
 			if (pendingRefSettings.tempoBpm) tempoBpm.value = String(pendingRefSettings.tempoBpm);
 			if (pendingRefSettings.tempoMeter) tempoMeter.value = pendingRefSettings.tempoMeter;
+			if (pendingRefSettings.tempoTolerancePercent) tempoTolerance.value = String(pendingRefSettings.tempoTolerancePercent);
+			if (pendingRefSettings.onsetProminenceThreshold) onsetProminence.value = String(pendingRefSettings.onsetProminenceThreshold);
+			if (pendingRefSettings.beatConfirmationThreshold) beatConfirmation.value = String(pendingRefSettings.beatConfirmationThreshold);
+			if (ref.beatAnchorSec !== null && referenceBarStarts.length) syncedReferenceRhythm = {
+				bpm: Number(tempoBpm.value), meter: tempoMeter.value, anchorSec: ref.beatAnchorSec,
+				barStartsSec: [...referenceBarStarts], virtualBarStartsSec: [...referenceVirtualBarStarts],
+			};
 			pendingRefSettings = null;
 		}
 		applyRefToPlayer();
 		progress.finish('參考音軌讀取完成');
-		rebuildReferenceBars();
+		if (restoredBeatState) {
+			document.getElementById('ref-beat-status')!.textContent = `已還原 ${referenceBeatRecords.length} 拍 · ${referenceVirtualBarStarts.length} 個虛擬拍點`;
+			syncRefUi();
+		} else rebuildReferenceBars();
 		const mainDur = outDuration();
 		hint(source && Math.abs(audio.duration - mainDur) > 0.5
 			? `參考音軌 ${fmtTime(audio.duration)} / 主唱 ${fmtTime(mainDur)}，長度不同，可能要調 offset`
@@ -1824,10 +2028,11 @@ function removeReference() {
 	player.setBackground(null);
 	refWave.setAudio(null);
 	refAudio = null;
-	referenceCache = null; referenceBarStarts = [];
+	referenceCache = null; referenceBarStarts = []; referenceVirtualBarStarts = [];
 	lastReferenceAnalysisRange = null;
 	ref.name = null;
 	ref.beatAnchorSec = null;
+	ref.beatAnchorSecs = [];
 	syncedReferenceRhythm = null;
 	rebuildReferenceBars();
 	syncRefUi();
@@ -1930,7 +2135,7 @@ async function completeAIReview() {
      keySelection:region.feedbackKey ?? {value:aiReview.input.key.id,label:aiReview.keyLabel},
      aiKey:aiReview.input.key,aiKeyLabel:aiReview.keyLabel,feedbackType,
      correctionKind:region.kind,aiLevel:aiReview.input.level,manualOffset:region.offset,
-     audioComparison:'before=AI proposal; after=user accepted result',
+     audioComparison:region.kind==='manual'?'before=manual selection baseline; after=user adjusted result':'before=AI proposal; after=user accepted result',
      originalPitch:Array.from(aiReview.input.curves.pitch.slice(region.from,region.to)),
      detectionRange:aiReview.input.range,selection:range}});
    pair.metadata.recordId=region.recordId;
@@ -1999,15 +2204,18 @@ async function discardAICorrection() {
 	if (!curves || !aiReview || workState.isBusy) return;
 	const task=workState.tryBegin('render','放棄 AI 修改');if(!task)return;
 	const target=aiReview.input.curves.clone();
+	const referenceBeatRange=aiReview.referenceBeatRange;
 	try {
 		player.pause();syncPlayButton();
 		task.update('還原 AI 修音前資料');
 		await renderer.patch(target,aiReview.input.range.start,aiReview.input.range.end);
+		const removedBeats=clearAIReferenceBeatRange(referenceBeatRange);
 		curves=target;manualBaseline=target.clone();history.truncate(aiReview.historyDepth);
 		aiRegions=[];aiReview=null;aiOverlay.clear();clearSelection();selectedAnchors.clear();
 		player.setAudio(renderer.rendered,renderer.sampleRate);resetParams();syncToolbar();
-		aiToolbar.setStatus('已放棄 AI 修改，整個音頻已回復到 AI 調音前');
-		hint('已放棄 AI 修改，整個音頻已回復到 AI 調音前');
+		const beatMessage=referenceBeatRange ? `；本次 AI 拍點已清除${removedBeats ? `（${removedBeats} 筆）` : ''}` : '';
+		aiToolbar.setStatus(`已放棄 AI 修改，整個音頻已回復到 AI 調音前${beatMessage}`);
+		hint(`已放棄 AI 修改，整個音頻已回復到 AI 調音前${beatMessage}`);
 		task.finish('AI 修改已取消');
 	}catch(error){const message=`放棄 AI 修改失敗：${error instanceof Error?error.message:String(error)}`;aiToolbar.setStatus(message);task.finish(message,true);}
 	finally{task.finish('放棄 AI 修改工作結束');syncAIControls();}
@@ -2024,7 +2232,7 @@ function syncAIControls() {
 		correct: correctDisabled,
 		correctTitle: aiRegions.length ? '請先取消目前 AI 修正標示，再執行下一次 AI 修正' : !editorOptions.keyValue ? '請先選擇 Key（不能是全部音）' : !range || range.end <= range.start ? '請先在檢測列標示範圍' : '只修正檢測範圍；修正後可逐框審核或取消整次 AI 修改',
 		discard: locked || !aiReady || !aiReview || !aiRegions.length,
-		discardTitle: aiRegions.length ? '放棄本次 AI 修音及黃框內人工調整，回復 AI 執行前的完整音頻' : '目前沒有可取消的 AI 修改',
+		discardTitle: aiRegions.length ? '放棄本次 AI 修音及黃框內人工調整，回復 AI 執行前的完整音頻，並清除本次 AI 檢測產生的拍點' : '目前沒有可取消的 AI 修改',
 		complete: locked || !aiRegions.length,
 	});
 	toolLaneControls.setDisabled(!!aiRegions.length || locked);
@@ -2049,6 +2257,7 @@ async function startAICorrection() {
 		level: aiToolbar.level, settings: aiSettings.settings, formantFollow: renderer.formantFollow,
 		referenceRhythm: referenceSyncEnabled && syncedReferenceRhythm ? { ...syncedReferenceRhythm,
 			barStartsSec: syncedReferenceRhythm.barStartsSec.filter(t => t >= range.start && t <= range.end),
+			virtualBarStartsSec: syncedReferenceRhythm.virtualBarStartsSec?.filter(t => t >= range.start && t < range.end),
 			pitch: syncedReferenceRhythm.pitch?.filter(p => p.timeSec >= range.start && p.timeSec <= range.end),
 		} : undefined,
 	}, update => {
@@ -2057,6 +2266,8 @@ async function startAICorrection() {
 	});
 	switch (outcome.status) {
 		case 'completed': {
+			const referenceBeatRange = referenceSyncEnabled && syncedReferenceRhythm && lastReferenceAnalysisRange
+				? { ...lastReferenceAnalysisRange } : null;
 			commitReferenceBeatRecords();
 			referenceBeatsCommitted = referenceSyncEnabled && syncedReferenceRhythm !== null && referenceBarStarts.length > 0;
 			const { settings, key, level, range } = outcome.input;
@@ -2079,8 +2290,8 @@ async function startAICorrection() {
 					channels: renderer.rendered.map(channel => channel.slice(fromSample, toSample)),
 				});
 			}
-			aiReview = { curves: curves!.clone(), input: outcome.input, audio: reviewAudio, keyLabel: key.label, historyDepth: historyDepthBeforeAI };
-			clearSelection();setTool('select');
+			aiReview = { curves: curves!.clone(), input: outcome.input, audio: reviewAudio, keyLabel: key.label, historyDepth: historyDepthBeforeAI, referenceBeatRange };
+			clearSelection();setActiveLane('pitch');setTool('select');
 			aiToolbar.setStatus(`${settings.provider === 'rules' ? '傳統內建修正' : settings.provider === 'builtin-ai' ? '內建 AI 修正' : '外部 AI 修正'}完成：${outcome.count} 個音符 · ${aiRegions.length} 個黃框 · ${outcome.segmentCount} 個低音壓分段 · ${key.label} · ${level}/10 · ${fmtTime(range.start)}～${fmtTime(range.end)}`);
 			break;
 		}
@@ -2101,7 +2312,7 @@ async function startAICorrection() {
 function commitReferenceBeatRecords() {
 	if (!referenceSyncEnabled || !syncedReferenceRhythm || !lastReferenceAnalysisRange) return;
 	referenceBeatRecords = mergeReferenceBeats(referenceBeatRecords, syncedReferenceRhythm.barStartsSec,
-		syncedReferenceRhythm.bpm, syncedReferenceRhythm.meter, lastReferenceAnalysisRange);
+		syncedReferenceRhythm.bpm, syncedReferenceRhythm.meter, lastReferenceAnalysisRange, syncedReferenceRhythm.virtualBarStartsSec);
 	document.getElementById('ref-beat-status')!.textContent = `已記錄 ${referenceBeatRecords.length} 拍 · 本次 ${referenceBarStarts.length} 個小節起點`;
 }
 
@@ -2128,8 +2339,8 @@ workState.subscribe(state => {
 const displayCoordinator = new DisplayCoordinator({
  readState: () => ({
   loaded: !!source, selection, curves, previewCurves: aiPreviewCurves, renderingRange,
-  selectedAnchors, aiRegions, pitchMidi, beatAnchor: ref.beatAnchorSec,
-  barStarts: referenceBarStarts, bpm: Number(tempoBpm.value), meter: tempoMeter.value,
+  selectedAnchors, aiRegions, pitchMidi, beatAnchors: ref.beatAnchorSecs,
+  barStarts: referenceBarStarts, virtualBarStarts: referenceVirtualBarStarts, bpm: Number(tempoBpm.value), meter: tempoMeter.value,
   analyzedBeats: referenceBeatsCommitted, beatRecords: ref.name ? referenceBeatRecords : [], locked: workState.isBusy,
  }),
  playback: player, waveform, referenceWaveform: refWave, pianoroll, aiOverlay,

@@ -42,6 +42,8 @@ body { display: flex; flex-direction: column; }
 .tempo-field { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .tempo-field select, .tempo-field input { color: var(--text); background: #252b34; border: 1px solid #485362; border-radius: 4px; padding: 3px 4px; font: inherit; }
 #tempo-bpm { width: 58px; }
+#tempo-tolerance { width: 38px; }
+#onset-prominence, #beat-confirmation { width: 46px; }
 #sync-reference { border-color: #a78930; }
 #sync-reference.on { color: #ffd54a; background: #453b21; }
 #ref-beat-status { color: #ffd54a; white-space: nowrap; }
@@ -143,6 +145,7 @@ main { flex: 1; display: grid; grid-template-rows: 1fr 18px 6px var(--wave-h, 15
 #bg-offset { width: 60px; }
 #bg-mute.on { border-color: #ff6b6b; color: #ff6b6b; }
 #ref-anchor-set.active, #ref-anchor-set.set { border-color: #ffd54a; color: #ffd54a; }
+#ref-beat-clear { border-color: #8a5353; }
 #ref-average-bpm { color: #ffd54a; font-variant-numeric: tabular-nums; white-space: nowrap; margin-left: 6px; }
 
 /* 波形放大：跟 automation 區的縱向縮放滑桿同一個樣子 */
@@ -464,6 +467,7 @@ body[data-workspace="readable"] .detection-legend { font-size: 12px; }
 
 .ai-regions { position:absolute;left:var(--piano-key-width);right:14px;top:0;bottom:0;z-index:4;pointer-events:none;overflow:hidden; }
 .ai-region { position:absolute;border:2px solid #ffff00;background:transparent;box-sizing:border-box;pointer-events:auto;cursor:ns-resize;touch-action:none; }
+.manual-selection-region { pointer-events:none;cursor:default;box-shadow:inset 0 0 0 1px #ffff0038; }
 .ai-region.dragging { background:#ffff0014; }
 .ai-region.dragging::after { content:attr(data-drag);position:absolute;top:34px;left:6px;padding:2px 5px;background:#171b21;color:#ffff00;font-size:11px;white-space:nowrap; }
 .ai-region.disabled { cursor:default; }
