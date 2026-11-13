@@ -218,15 +218,38 @@ export class RefWaveformView {
 			ctx.moveTo(x + size, y - size); ctx.lineTo(x - size, y + size);
 			ctx.stroke();
 		};
+		const drawChord = (time: number, chord: string, first: boolean, lowConfidence = false, edited = false, virtual = false) => {
+			const x = view.timeToX(time);
+			const color = virtual||lowConfidence ? '#65d68c' : first ? '#ff6b6b' : '#ffd54a';
+			ctx.font = '600 12px system-ui';
+			ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+			const width = ctx.measureText(chord).width + 8, height = 17, y = h - 11;
+			ctx.fillStyle = edited?color:'rgba(16, 19, 24, 0.82)';
+			ctx.fillRect(x - width / 2, y - height / 2, width, height);
+			ctx.fillStyle = edited?'#fff':color;
+			ctx.fillText(chord, x, y);
+		};
 		if (!analyzedBeats) for (const marker of referenceBeatGrid(barStarts, bpm, meter)) {
 			if (marker.barIndex === barStarts.length - 1 && !marker.downbeat) continue;
 			const virtual = marker.downbeat && virtualBarStarts.some(time => Math.abs(time - marker.time) < 0.005);
 			if (virtual) drawVirtualBeat(marker.time);
 			else drawBeat(marker.time, marker.downbeat, false);
 		}
-		for (const row of beatRecords) {
-			if (row.virtual) drawVirtualBeat(row.timeSec);
-			else drawBeat(row.timeSec, row.beatInBar === 1, true);
+		ctx.font = '600 12px system-ui';
+		const rows = [...beatRecords].sort((a, b) => a.timeSec - b.timeSec);
+		const markerWidths = rows.map(row => row.chord
+			? ctx.measureText(row.chord).width + 8 : row.beatInBar === 1 ? 12 : 8);
+		for (let index = 0; index < rows.length; index++) {
+			const row = rows[index];
+			if (row.virtual&&!row.chord) { drawVirtualBeat(row.timeSec); continue; }
+			const x = view.timeToX(row.timeSec), width = markerWidths[index];
+			const previousX = index ? view.timeToX(rows[index - 1].timeSec) : -Infinity;
+			const nextX = index + 1 < rows.length ? view.timeToX(rows[index + 1].timeSec) : Infinity;
+			const enoughLeft = index === 0 || x - previousX >= (markerWidths[index - 1] + width) / 2 + 4;
+			const enoughRight = index === rows.length - 1 || nextX - x >= (width + markerWidths[index + 1]) / 2 + 4;
+			if (row.chord && x >= width / 2 && x <= w - width / 2 && enoughLeft && enoughRight) {
+				 drawChord(row.timeSec,row.chord,row.beatInBar===1,row.chordConfidence==='low',row.chordEdited===true,row.virtual===true);
+			} else drawBeat(row.timeSec, row.beatInBar === 1, true);
 		}
 		for (const beatAnchor of beatAnchors) {
 			const ax = view.timeToX(beatAnchor);

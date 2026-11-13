@@ -5,6 +5,8 @@ const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', 
 try {
 	const page = await browser.newPage();
 	const errors=[];page.on('pageerror',error=>errors.push(error.message));
+	const failedRequests=[];
+	page.on('requestfailed', request => failedRequests.push(`${request.url()}: ${request.failure()?.errorText}`));
 	page.on('console',message=>{if(message.type()==='error')errors.push(message.text());});
 	await page.goto('http://127.0.0.1:5180/',{waitUntil:'domcontentloaded'});
 	const result=await page.evaluate(async()=>{
@@ -25,5 +27,19 @@ try {
 	assert.equal(result.plan.workers,4);assert.equal(result.plan.segments,4);
 	assert.equal(result.length,result.expected);assert.equal(result.finite,true);
 	assert.deepEqual(errors,[]);
+	// AI 檢測同時啟動主軌與參考軌，各自建立獨立的音高 Worker pool。
+	const dual = await page.evaluate(async () => {
+		const { detectPitchParallel } = await import('/src/analysis/pitch-parallel.ts');
+		const audio = Float32Array.from({length: 64000}, (_, i) => .2 * Math.sin(2 * Math.PI * 440 * i / 16000));
+		return Promise.all([0, 1].map(async () => {
+			const track = await detectPitchParallel(audio, {mode: 'wasm', workerLimit: 2,
+				segmentCount: 2, minWorkSeconds: .5, forceSegmentCount: true});
+			return {length: track.length, finite: Array.from(track.f0).every(Number.isFinite)};
+		}));
+	});
+	for (const track of dual) { assert.equal(track.length, 250); assert.equal(track.finite, true); }
+	assert.deepEqual(errors, []);
+	assert.deepEqual(failedRequests, []);
+	console.log('PASS: concurrent main/reference pitch pools without failed network requests');
 	console.log(`PASS: ${result.plan.workers} persistent SwiftF0 Workers merged ${result.plan.segments} segments in ${(result.ms/1000).toFixed(2)}s`);
 }finally{await browser.close();}

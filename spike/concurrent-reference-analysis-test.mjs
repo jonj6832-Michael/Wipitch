@@ -57,6 +57,10 @@ if (!isMainThread) {
 			{ timeSec: 1, confirmed: true }, { timeSec: 3, confirmed: false },
 			{ timeSec: 5, confirmed: false }, { timeSec: 7, confirmed: false },
 		], '113.7 BPM is just outside the 120 BPM -5% boundary, but every missed point remains marked');
+		const slowing=new Float32Array(1200);for(const time of [3,5.1,7.31])slowing[Math.round(time*100)]=2;
+		assert.deepEqual(trackBarSequence({mono16k:audio,onsets:slowing,duration:10},1,120,'4/4',0,10,.10),[
+			{timeSec:1,confirmed:true},{timeSec:3,confirmed:true},{timeSec:5.1,confirmed:true},{timeSec:7.31,confirmed:true},{timeSec:9.52,confirmed:false},
+		], 'bar two uses initial BPM and each later bar carries the previous measured interval for gradual slowing');
 		console.log('PASS: fixed anchor, sequential BPM ±5% search, missing-beat carry-forward and virtual markers');
 	} finally { await worker.terminate(); }
 }

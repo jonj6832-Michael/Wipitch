@@ -17,6 +17,20 @@ export function selectRuleNotes(base: Curves, notes: readonly CorrectionNote[], 
 	for (const note of notes) {
 		const target = note.defaultTarget;
 		if (target === null) continue;
+		// 參考和弦已確認這是同一個長音的單方向修正；保留完整區段，
+		// 不因中間短暫回到容許帶而拆成多個黃框。
+		if (note.referenceDirection && note.referenceDirection !== 'none') {
+			const end = Math.min(note.to, base.length, midi.length, voiced.length);
+			const values: number[] = [];
+			for (let i = note.from; i < end; i++) if (voiced[i] && Number.isFinite(midi[i])) values.push(midi[i] + base.pitch[i]);
+			values.sort((a, b) => a - b);
+			if (values.length && base.timeMap.srcToOut(end * CURVE_HOP_SEC) - base.timeMap.srcToOut(note.from * CURVE_HOP_SEC) + 1e-9 >= minimum) {
+				const center = values[Math.floor(values.length / 2)];
+				result.push({ ...note, id: result.length, to: end, center,
+					spread: values[Math.floor((values.length - 1) * .9)] - values[Math.floor((values.length - 1) * .1)] });
+			}
+			continue;
+		}
 		let start = note.from, direction = 0;
 		const emit = (end: number) => {
 			if (!direction || end <= start) return;

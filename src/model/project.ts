@@ -6,9 +6,24 @@
 import { Curves, CURVE_HOP_SEC, CURVE_SUB, upsample, type LaneId } from './curves';
 import { TimeMap } from './timemap';
 import type { ReferenceBeatRecord } from './reference-beat-table';
+import type { AIRegion } from './ai-regions';
 
 const FORMAT = 'wipitch-project';
-const VERSION = 5;
+const VERSION = 6;
+
+interface StoredAIRegion extends Omit<AIRegion, 'original' | 'ai' | 'adjusted' | 'originalFormant' | 'aiFormant' | 'adjustedFormant'> {
+	original: number[];
+	ai: number[];
+	adjusted: number[];
+	originalFormant: number[];
+	aiFormant: number[];
+	adjustedFormant: number[];
+}
+
+export interface InspectionSettings {
+	detectionRange?: { start:number; end:number } | null;
+	aiRegions?: AIRegion[];
+}
 
 interface ProjectFile {
 	format: string;
@@ -16,6 +31,10 @@ interface ProjectFile {
 	audioName: string;
 	/** v5：本機原始音訊的絕對路徑；舊專案沒有此欄位。 */
 	audioPath?: string;
+	/** v6：回存按鈕實際覆寫的位置；audioPath 可能改指向安全備份。 */
+	audioWritebackPath?: string;
+	audioSize?: number;
+	audioSha256?: string;
 	sampleRate: number;
 	duration: number;
 	hopSec: number;
@@ -33,6 +52,8 @@ interface ProjectFile {
 	anchors?: { src: number; out: number }[];
 	/** 背景參考音軌的設定（不含音訊，讀檔後要使用者重新載入同名檔） */
 	background?: BackgroundSettings;
+	/** v6：檢測範圍與尚在畫面上的 AI／人工黃框。 */
+	inspection?: { detectionRange?: { start:number; end:number } | null; aiRegions?: StoredAIRegion[] };
 	/** v1 欄位：半音偏移與「線性」增益 */
 	delta?: string;
 	gain?: string;
@@ -40,6 +61,9 @@ interface ProjectFile {
 
 export interface BackgroundSettings {
 	name: string;
+	/** 參考檔身分；避免不同目錄中的同名音檔誤套拍點與和弦。 */
+	fileSize?: number;
+	lastModified?: number;
 	gainDb: number;
 	muted: boolean;
 	offsetSec: number;
@@ -49,6 +73,7 @@ export interface BackgroundSettings {
 	tempoBpm?: number;
 	tempoMeter?: string;
 	tempoTolerancePercent?: number;
+	instrumentProfile?: 'rhythm' | 'melody';
 	onsetProminenceThreshold?: number;
 	beatConfirmationThreshold?: number;
 	barStartsSec?: number[];
@@ -58,11 +83,12 @@ export interface BackgroundSettings {
 
 export function serialize(
 	curves: Curves, audioName: string, audioPath: string, sampleRate: number, duration: number, formantFollow = 0,
-	background?: BackgroundSettings,
+	background?: BackgroundSettings, inspection?: InspectionSettings, audioWritebackPath = audioPath,
+	audioSize?: number, audioSha256?: string,
 ): string {
 	const data: ProjectFile = {
 		format: FORMAT, version: VERSION,
-		audioName, audioPath, sampleRate, duration,
+		audioName, audioPath, audioWritebackPath, audioSize, audioSha256, sampleRate, duration,
 		hopSec: CURVE_HOP_SEC, length: curves.length,
 		pitch: toBase64(curves.pitch),
 		gainDb: toBase64(curves.gainDb),
@@ -72,6 +98,15 @@ export function serialize(
 		formantFollow,
 		anchors: curves.timeMap.anchors.map(a => ({ src: a.src, out: a.out })),
 		background,
+		inspection: inspection ? {
+			detectionRange: inspection.detectionRange ? { ...inspection.detectionRange } : inspection.detectionRange,
+			aiRegions: inspection.aiRegions?.map(region => ({ ...region,
+				original: Array.from(region.original), ai: Array.from(region.ai), adjusted: Array.from(region.adjusted),
+				originalFormant: Array.from(region.originalFormant), aiFormant: Array.from(region.aiFormant),
+				adjustedFormant: Array.from(region.adjustedFormant),
+				feedbackKey: region.feedbackKey ? { ...region.feedbackKey } : undefined,
+			})),
+		} : undefined,
 	};
 	return JSON.stringify(data, null, 2);
 }
@@ -87,12 +122,16 @@ export interface LoadedProject {
 	/** 全域的 Voice(0) / Instrument(1) 模式 */
 	formantFollow: number;
 	background?: BackgroundSettings;
+	inspection?: InspectionSettings;
 }
 
 export interface ProjectSource {
 	version: number;
 	audioName: string;
 	audioPath?: string;
+	audioWritebackPath?: string;
+	audioSize?: number;
+	audioSha256?: string;
 	sampleRate: number;
 	duration: number;
 }
@@ -102,16 +141,50 @@ function parseProject(text: string): ProjectFile {
 	if (d.format !== FORMAT) throw new Error('這不是 WiPitch 專案檔');
 	if (!Number.isInteger(d.version) || d.version < 1) throw new Error('專案檔版本無效');
 	if (d.version > VERSION) throw new Error(`專案檔版本 ${d.version} 太新，這個版本讀不了`);
-	if (!d.audioName || !Number.isFinite(d.sampleRate) || !Number.isFinite(d.duration)) throw new Error('專案檔缺少原始音訊資訊');
+	if (!d.audioName || !Number.isFinite(d.sampleRate) || d.sampleRate <= 0 || !Number.isFinite(d.duration) || d.duration <= 0) throw new Error('專案檔缺少原始音訊資訊');
+	if (!Number.isInteger(d.length) || d.length <= 0) throw new Error('專案檔的曲線長度無效');
+	if (d.audioSize !== undefined && (!Number.isInteger(d.audioSize) || d.audioSize <= 0)) throw new Error('專案檔的音訊大小無效');
+	if (d.audioSha256 !== undefined && (typeof d.audioSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(d.audioSha256))) throw new Error('專案檔的音訊指紋無效');
 	if (d.version >= 5 && d.audioPath === undefined) throw new Error('專案檔缺少原始音訊的絕對路徑');
-	if (d.audioPath !== undefined && (typeof d.audioPath !== 'string' || !d.audioPath.startsWith('/'))) throw new Error('專案檔的音訊絕對路徑無效');
+	const absolute = (value: unknown): value is string => typeof value === 'string'
+		&& (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value));
+	if (d.audioPath !== undefined && !absolute(d.audioPath)) throw new Error('專案檔的音訊絕對路徑無效');
+	if (d.audioWritebackPath !== undefined && !absolute(d.audioWritebackPath)) throw new Error('專案檔的回存音訊路徑無效');
+	if (d.audioPath && d.audioWritebackPath && !relatedAudioPaths(d.audioPath, d.audioWritebackPath)) {
+		throw new Error('專案檔的回存音訊路徑與來源檔案不相符');
+	}
+	if (d.version >= 6) {
+		const expectedBytes = d.length * Float32Array.BYTES_PER_ELEMENT;
+		for (const [label, value] of [['pitch', d.pitch], ['gainDb', d.gainDb], ['formant', d.formant]] as const) {
+			if (typeof value !== 'string') throw new Error(`專案檔缺少 ${label} 曲線`);
+			let bytes = -1;
+			try { bytes = atob(value).length; } catch { throw new Error(`專案檔的 ${label} 曲線編碼損壞`); }
+			if (bytes !== expectedBytes) throw new Error(`專案檔的 ${label} 曲線長度不完整`);
+		}
+	}
 	return d;
+}
+
+function relatedAudioPaths(source: string, writeback: string): boolean {
+	const split = (value: string) => {
+		const normalized = value.replaceAll('\\', '/');
+		const slash = normalized.lastIndexOf('/');
+		const directory = normalized.slice(0, slash).toLowerCase();
+		const name = normalized.slice(slash + 1);
+		const dot = name.lastIndexOf('.');
+		return { directory, base: (dot < 0 ? name : name.slice(0, dot)).toLowerCase(), extension: (dot < 0 ? '' : name.slice(dot)).toLowerCase() };
+	};
+	const a = split(source), b = split(writeback);
+	return a.directory === b.directory && a.extension === b.extension
+		&& (a.base === b.base || a.base === `${b.base}.wipitch-original`);
 }
 
 /** 先取得原音訊位置，讓應用程式能先載入音訊，再還原曲線。 */
 export function inspectProject(text: string): ProjectSource {
 	const d = parseProject(text);
-	return { version: d.version, audioName: d.audioName, audioPath: d.audioPath, sampleRate: d.sampleRate, duration: d.duration };
+	return { version: d.version, audioName: d.audioName, audioPath: d.audioPath, audioWritebackPath: d.audioWritebackPath,
+		...(d.audioSize===undefined?{}:{audioSize:d.audioSize}),...(d.audioSha256===undefined?{}:{audioSha256:d.audioSha256}),
+		sampleRate: d.sampleRate, duration: d.duration };
 }
 
 export function deserialize(text: string, sampleRate: number, trackLength: number): LoadedProject {
@@ -147,7 +220,27 @@ export function deserialize(text: string, sampleRate: number, trackLength: numbe
 			curves.gainDb.set(upsample(db));
 		}
 	}
-	return { curves, formantFollow: d.formantFollow ?? 0, background: d.background };
+	return { curves, formantFollow: d.formantFollow ?? 0, background: d.background,
+		inspection: restoreInspection(d.inspection, curves.length) };
+}
+
+function restoreInspection(value: ProjectFile['inspection'], curveLength:number):InspectionSettings|undefined {
+	if(!value||typeof value!=='object')return undefined;
+	const range=value.detectionRange;
+	const detectionRange=range&&Number.isFinite(range.start)&&Number.isFinite(range.end)&&range.end>range.start
+		?{start:range.start,end:range.end}:null;
+	const arrays=(region:StoredAIRegion)=>[region.original,region.ai,region.adjusted,region.originalFormant,region.aiFormant,region.adjustedFormant];
+	const aiRegions=(Array.isArray(value.aiRegions)?value.aiRegions:[]).filter((region):region is StoredAIRegion=>{
+		if(!region||!Number.isInteger(region.id)||!Number.isInteger(region.from)||!Number.isInteger(region.to)
+			||region.from<0||region.to<=region.from||region.to>curveLength)return false;
+		const length=region.to-region.from;
+		return arrays(region).every(array=>Array.isArray(array)&&array.length===length&&array.every(Number.isFinite));
+	}).map(region=>({...region,
+		original:Float32Array.from(region.original),ai:Float32Array.from(region.ai),adjusted:Float32Array.from(region.adjusted),
+		originalFormant:Float32Array.from(region.originalFormant),aiFormant:Float32Array.from(region.aiFormant),
+		adjustedFormant:Float32Array.from(region.adjustedFormant),feedbackKey:region.feedbackKey?{...region.feedbackKey}:undefined,
+	}));
+	return {detectionRange,aiRegions};
 }
 
 function toBase64(a: Float32Array): string {

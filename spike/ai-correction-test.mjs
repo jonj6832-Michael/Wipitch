@@ -14,6 +14,13 @@ base.gainDb.fill(2); base.formant.fill(-.5);
 const range = { start: .5, end: 2.5 };
 const notes = correctionNotes(base, midi, voiced, key, range);
 assert.equal(notes.length, 1); assert.equal(notes[0].defaultTarget, 60);
+const thresholdMidi=new Float32Array(1200),thresholdVoiced=new Uint8Array(1200).fill(1),thresholdCurves=new Curves(1200);
+for(let i=0;i<thresholdMidi.length;i++)thresholdMidi[i]=60.27+.08*Math.sin(i*CURVE_HOP_SEC*2*Math.PI*2);
+assert.equal(correctionNotes(thresholdCurves,thresholdMidi,thresholdVoiced,key,{start:0,end:2}).length,1,
+	'門檻附近的慢顫音仍是同一個長音候選');
+thresholdMidi.fill(60.3);thresholdMidi.fill(60.03,350,450);
+assert.equal(correctionNotes(thresholdCurves,thresholdMidi,thresholdVoiced,key,{start:0,end:2}).length,2,
+	'長時間真正回準後再次偏離仍要分成兩段');
 const decisions = notes.map(n => ({ id: n.id, targetMidi: 60 }));
 let previous = Infinity;
 for (let level = 1; level <= 10; level++) {

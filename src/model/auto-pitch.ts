@@ -11,6 +11,7 @@ export interface CorrectionNote {
 	spread: number;
 	targets: number[];
 	defaultTarget: number | null;
+	referenceDirection?: 'up' | 'down' | 'none';
 }
 export interface CorrectionDecision { id: number; targetMidi: number | null }
 export type CorrectionStrategy = 'strength' | 'sensitivity';
@@ -39,19 +40,48 @@ export function correctionNotes(curves: CorrectionCurveView, midi: Float32Array,
 	let start = 0;
 	const emit = (end: number) => {
 		if (end - start < 6) return; // 少於約 96ms 的音符／過渡先不修正。
-		const values = points.slice(start, end).map(p => p.value).sort((a, b) => a - b);
-		const center = median(values);
-		const spread = values[Math.floor((values.length - 1) * .9)] - values[Math.floor((values.length - 1) * .1)];
-		if (!Number.isFinite(center) || spread > .9) return; // 滑音或不穩定段落。
-		const targets: number[] = [];
-		for (let n = Math.max(0, Math.ceil(center - 1.5)); n <= Math.min(127, Math.floor(center + 1.5)); n++) {
-			if (isInKey(n, key)) targets.push(n);
+		const nearestKeyTarget = (value: number): number | null => {
+			let best: number | null = null, distance = Infinity;
+			for (let n = Math.max(0, Math.floor(value) - 2); n <= Math.min(127, Math.ceil(value) + 2); n++) {
+				if (!isInKey(n, key)) continue;
+				const nextDistance = Math.abs(n - value);
+				if (nextDistance < distance || (nextDistance === distance && (best === null || n < best))) {
+					best = n; distance = nextDistance;
+				}
+			}
+			return best;
+		};
+		const addSegment = (segmentStart: number, segmentEnd: number) => {
+			if (segmentEnd - segmentStart < 6) return; // 至少約 96ms 的連續偏離。
+			const segmentValues = points.slice(segmentStart, segmentEnd).map(point => point.value).filter(Number.isFinite);
+			if (segmentValues.length < 6) return;
+			const ordered = [...segmentValues].sort((a, b) => a - b);
+			const center = median(ordered);
+			const spread = ordered[Math.floor((ordered.length - 1) * .9)] - ordered[Math.floor((ordered.length - 1) * .1)];
+			if (!Number.isFinite(center) || spread > .9) return; // 保留長音內的穩定偏離，排除滑音。
+			const targets: number[] = [];
+			for (let n = Math.max(0, Math.ceil(center - 1.5)); n <= Math.min(127, Math.floor(center + 1.5)); n++) {
+				if (isInKey(n, key)) targets.push(n);
+			}
+			targets.sort((a, b) => Math.abs(a - center) - Math.abs(b - center) || a - b);
+			const defaultTarget = nearestKeyTarget(center);
+			if (!targets.length || defaultTarget === null) return;
+			const ambiguous = targets.length > 1 && Math.abs(targets[1] - center) - Math.abs(targets[0] - center) < .15;
+			notes.push({ id: notes.length, from: points[segmentStart].frame,
+				to: Math.min(to, points[segmentEnd - 1].frame + CURVE_SUB), center, spread, targets,
+				defaultTarget: ambiguous ? null : defaultTarget });
+		};
+			let segmentStart = -1, segmentSign = 0;
+		for (let i = start; i <= end; i++) {
+			const value = i < end ? points[i].value : NaN;
+			const target = Number.isFinite(value) ? nearestKeyTarget(value) : null;
+			const error = target === null ? 0 : value - target;
+				const errorSign = Math.sign(error);
+				if (segmentSign !== 0 && errorSign === segmentSign && Math.abs(error) >= .12) continue;
+				if (segmentStart >= 0) addSegment(segmentStart, i);
+				if (Math.abs(error) >= .25) { segmentStart = i; segmentSign = errorSign; }
+				else { segmentStart = -1; segmentSign = 0; }
 		}
-		targets.sort((a, b) => Math.abs(a - center) - Math.abs(b - center) || a - b);
-		if (!targets.length) return;
-		const ambiguous = targets.length > 1 && Math.abs(targets[1] - center) - Math.abs(targets[0] - center) < .15;
-		notes.push({ id: notes.length, from: points[start].frame, to: Math.min(to, points[end - 1].frame + CURVE_SUB),
-			center, spread, targets, defaultTarget: ambiguous ? null : targets[0] });
 	};
 	while (start < points.length) {
 		if (!Number.isFinite(points[start].value)) { start++; continue; }

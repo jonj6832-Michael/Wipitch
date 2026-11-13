@@ -3,9 +3,10 @@ import { contextCorrectionNotes } from '../model/context-correction';
 import type { ReferenceRhythm } from '../analysis/reference-cache';
 import { applyCorrection, type CorrectionNote } from '../model/auto-pitch';
 import { suggestCorrections, type AISettings } from '../analysis/ai-correction';
-import type { Curves } from '../model/curves';
+import { CURVE_HOP_SEC, type Curves } from '../model/curves';
 import type { KeySignature } from '../model/keys';
 import type { WorkState } from './work-state';
+import { applyReferenceHarmony } from '../model/reference-harmony';
 
 export interface CorrectionInput {
 	curves: Curves;
@@ -99,18 +100,43 @@ export class AICorrectionFlow {
 					.sort((a, b) => a.from - b.from).map((note, id) => ({ ...note, id }));
 			}
 			if (controller.signal.aborted) throw new Error('AI 修正已取消，未套用變更');
-			if (!notes.length) throw new Error('檢測範圍內沒有足夠可靠的修正候選；缺少穩定參考的起音及不確定段落會保留');
+			if (!notes.length) {
+				const hasVoiced = ranges.some(segment => {
+					const from = Math.max(0, Math.ceil(before.timeMap.outToSrc(segment.start) / CURVE_HOP_SEC));
+					const to = Math.min(midi.length, voiced.length, Math.ceil(before.timeMap.outToSrc(segment.end) / CURVE_HOP_SEC));
+					for (let i = from; i < to; i++) if (voiced[i] && Number.isFinite(midi[i])) return true;
+					return false;
+				});
+				if (hasVoiced) { finishLabel = '沒有足夠可靠且需要修正的候選，保留原音'; return { status: 'unchanged' }; }
+				throw new Error('檢測範圍內沒有足夠可靠的修正候選；缺少穩定參考的起音及不確定段落會保留');
+			}
 			if (settings.provider === 'rules') {
 				notes = selectRuleNotes(before, notes, midi, voiced, level);
 				if (!notes.length) { finishLabel = '沒有符合持續時間的偏離區段'; return { status: 'unchanged' }; }
 			}
 			const decisions = await (d.suggest ?? suggestCorrections)(settings, notes, key, controller.signal, (done, total) => {
 				notify({ message: `AI 建議 ${done} / ${total} 批（${notes.length} 個音符）`, label: 'AI 分析音符摘要', fraction: total ? done / total : 0, cancellable: !controller.signal.aborted });
-			}, fetch, snapshot.referenceRhythm);
+			}, fetch);
 			if (controller.signal.aborted) throw new Error('AI 修正已取消，未套用變更');
-			const result = applyCorrection(before, notes, decisions, key, level, voiced,
+			let result = applyCorrection(before, notes, decisions, key, level, voiced,
 				settings.provider === 'rules' ? 'sensitivity' : 'strength', snapshot.formantFollow ?? 0);
 			if (!result.count || d.sameCurves(before, result.curves)) { finishLabel = '沒有套用修正'; return { status: 'unchanged' }; }
+			// 黃框完全由原本 AI 結果決定；參考和弦只能改變已入選框內的目標。
+			const regions = notes.filter(n => {
+				for (let i = n.from; i < n.to; i++) if (result.curves.pitch[i] !== before.pitch[i]) return true;
+				return false;
+			});
+			const directed = applyReferenceHarmony(regions, before, snapshot.referenceRhythm);
+			for (const note of directed) {
+				if (!note.referenceDirection || note.referenceDirection === 'none') continue;
+				const adjusted = applyCorrection(before, [note], [{ id: note.id, targetMidi: note.defaultTarget }],
+					key, level, voiced, settings.provider === 'rules' ? 'sensitivity' : 'strength', snapshot.formantFollow ?? 0);
+				// 無有效替代修正時保留原本結果，不能讓參考和弦消除黃框。
+				if (!adjusted.count || !adjusted.curves.pitch.subarray(note.from, note.to)
+					.some((value, index) => value !== before.pitch[note.from + index])) continue;
+				result.curves.pitch.set(adjusted.curves.pitch.subarray(note.from, note.to), note.from);
+				result.curves.formant.set(adjusted.curves.formant.subarray(note.from, note.to), note.from);
+			}
 			this.cancellable = false;
 			notify({ message: '正在套用修正音訊…', label: '算繪修正音訊', cancellable: false });
 			await d.render(result.curves, range);
@@ -119,7 +145,7 @@ export class AICorrectionFlow {
 			d.updatePlayback();
 			d.scheduleBackground(range);
 			return { status: 'completed', count: result.count, input: snapshot, segmentCount: ranges.length,
-				regions: notes.filter(n => { for(let i=n.from;i<n.to;i++) if(result.curves.pitch[i]!==before.pitch[i]) return true; return false; }) };
+				regions };
 		} catch (error) {
 			failed = !controller.signal.aborted;
 			finishLabel = controller.signal.aborted ? 'AI 修正已取消，未套用變更' : error instanceof Error ? error.message : '修正失敗';

@@ -4,7 +4,7 @@
  * 這是純顯示偏好：不讀取音訊、曲線、選取範圍或工作狀態。工作區值由 body 的
  * data-workspace 驅動 CSS，並保存在瀏覽器本機，重新載入時仍維持使用者上次的選擇。
  */
-export const WORKSPACE_IDS = ['workstation', 'focus', 'readable'] as const;
+export const WORKSPACE_IDS = ['workstation', 'focus', 'readable', 'guide'] as const;
 export type WorkspaceId = typeof WORKSPACE_IDS[number];
 
 const STORAGE_KEY = 'wipitch.workspace-layout.v1';

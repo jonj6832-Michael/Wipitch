@@ -11,6 +11,8 @@ export interface Source {
 	duration: number;
 	/** 給音高偵測用的 16kHz 單聲道版本；分析成功後釋放。 */
 	mono16k: Samples | null;
+	/** 原始檔位元組 SHA-256；檢測檔用來避免套用到同長度的其他音訊。 */
+	contentSha256?: string;
 }
 
 /** SwiftF0 的工作取樣率。所有音高分析都在這個取樣率上做。 */
@@ -32,6 +34,8 @@ function readAudioFile(file: File, onProgress?: DecodeProgress): Promise<ArrayBu
 
 export async function decodeFile(file: File, onProgress?: DecodeProgress): Promise<Source> {
 	const bytes = await readAudioFile(file, onProgress);
+	const digest = await crypto.subtle.digest('SHA-256', bytes.slice(0));
+	const contentSha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
 
 	// 用一個暫時的 AudioContext 解碼。瀏覽器原生解碼器支援 wav/mp3/flac/m4a 等格式，
 	// 比自己寫解析器可靠得多。
@@ -54,6 +58,7 @@ export async function decodeFile(file: File, onProgress?: DecodeProgress): Promi
 		sampleRate: buffer.sampleRate,
 		duration: buffer.duration,
 		mono16k: await toMono16k(buffer),
+		contentSha256,
 	};
 }
 

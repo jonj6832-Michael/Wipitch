@@ -6,7 +6,9 @@ import { AIRegionOverlay } from './ui/ai-regions';
 import { installTrainingLibrary } from './ui/training-library';
 import { prepareTrainingPair, stageTrainingPair, storeRejectedTrainingPair, resetTrainingStaging, commitTrainingStaging } from './training/recorder';
 import type { Diagnostics } from './dev/diagnostics';
-import { decodeFile, decodeAudio, sourceRangeMono16k, fmtTime, type Source } from './audio/decode';
+import { decodeFile, decodeAudio, fmtTime, type Source } from './audio/decode';
+import { detectLibrosaBeatHarmony } from './analysis/librosa-chords';
+import { detectLibrosaRhythm } from './analysis/librosa-rhythm';
 import { ViewState } from './view/viewstate';
 import { WaveformView, RefWaveformView, drawOverview } from './view/waveform';
 import { RangeBar } from './view/rangebar';
@@ -17,11 +19,9 @@ import { Renderer } from './engine/renderer';
 import { detectPitchParallel } from './analysis/pitch-parallel';
 import { createReferenceCache, createSpectralFluxOnsets, findOnset, type ReferenceCache, type ReferenceRhythm } from './analysis/reference-cache';
 import { referenceBeatPreview } from './model/reference-beat-preview';
-import { clearReferenceBeatsInRange, hasReferenceBeatsInRange, mergeReferenceBeats, referenceBeatInRange, restoreReferenceBeats, shiftReferenceBeats, type ReferenceBeatRecord } from './model/reference-beat-table';
+import { clearReferenceBeatsInRange, hasReferenceBeatsInRange, mergeReferenceBeats, referenceBeatInRange, referenceRhythmForRange, restoreReferenceBeats, shiftReferenceBeats, type ReferenceBeatRecord } from './model/reference-beat-table';
 import { referenceBeatGrid } from './model/reference-beat-grid';
 import { averageBarBpm } from './analysis/bar-tempo';
-import { detectReferenceRhythm } from './analysis/reference-rhythm';
-import { concurrentAnalysis } from './application/concurrent-analysis';
 import { hzToMidi, midiToName, type PitchTrack } from './analysis/swiftf0';
 import { Curves, LANES, LANE_IDS, PEN_RAMP_SEC, DEFAULT_PITCH_SLOPE_LIMIT, CURVE_HOP_SEC, CURVE_SUB, upsample, upsampleVoiced, type LaneId } from './model/curves';
 import { offsetLane, resetLane, resetAll, drawLane, flattenRange, fillGaps, limitSlope, slopeMarginFrames } from './model/edits';
@@ -29,7 +29,7 @@ import { History } from './model/history';
 import { TimeMap } from './model/timemap';
 import { encodeWav24, downloadBlob } from './audio/wav';
 import { serialize, deserialize, inspectProject, type BackgroundSettings } from './model/project';
-import { pickLocalAudio, readLocalAudio } from './local-audio';
+import { findLocalDetectionFile, hasLocalFileAccess, overwriteLocalAudio, pickLocalAudio, readLocalAudio, writeLocalDetectionFile } from './local-audio';
 import { ProgressView } from './ui/progress';
 import { WorkState, type WorkTask } from './application/work-state';
 import { bindZoomGesture } from './ui/zoom-gesture';
@@ -37,11 +37,12 @@ import { DetectionBar } from './ui/detection-bar';
 import { ComputeModeControl } from './ui/compute-mode';
 import { bindPianoAudition } from './ui/piano-audition';
 import { LoadTimings, analyseSource } from './loading';
-import { AICorrectionFlow } from './application/ai-correction-flow';
+import { AICorrectionFlow, type CorrectionInput } from './application/ai-correction-flow';
 import { AISettingsView } from './ui/ai-settings';
 import { updateBuiltinAIModel } from './analysis/builtin-ai';
 import { availableParallelWorkers, planBalancedAudioSegments } from './analysis/audio-segments';
 import { collectCorrectionNotesParallel } from './analysis/ai-candidate-pool';
+import { chordPitchClasses } from './model/reference-harmony';
 import { EditInspectorView, type EditParamKey } from './ui/edit-inspector';
 import { ToolLaneControlsView, type EditorTool } from './ui/tool-lane-controls';
 import { TransportView } from './ui/transport';
@@ -53,6 +54,7 @@ import { GlobalControlsView } from './ui/global-controls';
 import { DetectionControlsView } from './ui/detection-controls';
 import { LoadReportView } from './ui/load-report';
 import { WorkspaceLayoutView } from './ui/workspace-layout';
+import { GuideModeView } from './ui/guide-mode';
 
 const el = {
 	stage: document.getElementById('stage')!,
@@ -71,18 +73,46 @@ const el = {
 	refAmpZoom: document.getElementById('ref-amp-zoom') as HTMLInputElement,
 };
 
-// 版面選擇不屬於音訊／修音流程；它只把目前偏好映射成 body 的 CSS 狀態。
-new WorkspaceLayoutView(document.getElementById('workspace-selector')!);
-
 const headerPanel = new HeaderPanelView(document.querySelector('header')!, {
 	selectAudio: file => { void load(file); },
 	openAudio: () => { void openLocalAudio(); },
 	exportWav: () => { void exportWav(); },
-	saveProject,
+	overwriteOriginal: () => { void overwriteOriginalAudio(); },
+	saveProject: () => { void saveProject(); },
 	openProject: file => { void openProject(file); },
 	setFormantFollow: follow => { void setMode(follow); },
 });
 headerPanel.setBuildVersion(`建置 ${__BUILD_TIME__}`);
+
+const guideMode = new GuideModeView(document.getElementById('guide-dialog')!, {
+	hasMainAudio: () => !!source,
+	hasReferenceAudio: () => !!ref.name,
+	openMainAudio: () => document.getElementById('open-audio')?.click(),
+	openReferenceAudio: () => document.getElementById('bg-file')?.click(),
+	startReferenceAnalysis: analyzeReferenceTrack,
+	startAI: startAICorrection,
+	completeAI: completeAIReview,
+	getRange: () => detectionBar.range,
+	hasKey: () => !!editorOptions.keyValue,
+	hasAnchor: () => ref.beatAnchorSecs.length > 0,
+	hasBeats: () => {
+		const range = detectionBar.range;
+		return !!range && hasReferenceBeatsInRange(referenceBeatRecords, range);
+	},
+	hasAIRegions: () => aiRegions.length > 0,
+	hasAIReview: () => !!aiReview,
+	hasCompletedAI: () => !aiReview && aiRegions.length === 0,
+	resetRange: () => { detectionBar.set(null); clearSelection(); },
+});
+// 引導模式與完整工作站等版面同屬正式工作區；選擇會保存在本機。
+const workspaceLayout = new WorkspaceLayoutView(document.getElementById('workspace-selector')!, {
+	changed: workspace => {
+		if (workspace === 'guide') guideMode.open();
+		else guideMode.close();
+	},
+});
+// 從本機偏好還原引導工作區時，等模組內所有音訊／AI 狀態完成初始化後再讀取步驟條件。
+if (workspaceLayout.current === 'guide') queueMicrotask(() => guideMode.open());
 installTrainingLibrary(document.getElementById('training-library-open')!);
 
 const aiToolbar = new AIToolbarView(document.getElementById('ai-toolbar')!, {
@@ -112,7 +142,7 @@ const globalControls = new GlobalControlsView(el.globalBar, {
 	clearSelection: () => { clearSelection(); hint(''); },
 });
 const player = new Player();
-const renderer = new Renderer();
+let renderer = new Renderer();
 const history = new History();
 const workState = new WorkState();
 const progressView = new ProgressView(document.getElementById('progress')!);
@@ -121,10 +151,19 @@ let backgroundTask: WorkTask | null = null;
 
 let source: Source | null = null;
 let sourceAbsolutePath: string | null = null;
+let sourceWritebackPath: string | null = null;
 let manualBaseline: Curves | null = null;
 let aiRegions: AIRegion[] = [];
 let aiPreviewCurves: Curves | null = null;
-let aiReview: { curves: Curves; input: import('./application/ai-correction-flow').CorrectionInput; audio: Map<number, { start:number; end:number; channels: import('./types').Samples[] }>; keyLabel:string; historyDepth:number; referenceBeatRange: { start:number; end:number } | null } | null = null;
+type TimeRange = { start:number; end:number };
+type AIReviewSource = { input:CorrectionInput; proposal:Curves; keyLabel:string };
+let aiReview: {
+	baseline: Curves;
+	audio: Map<number, { start:number; end:number; channels: import('./types').Samples[] }>;
+	historyDepth:number;
+	sources: Map<number, AIReviewSource>;
+	runs: AIReviewSource[];
+} | null = null;
 
 let stagedTrainingCount = 0;
 let trainingAsset: { id: string; name: string; size: number; lastModified: number } | null = null;
@@ -210,6 +249,7 @@ const detectionBar = new DetectionBar(document.getElementById('detection-bar')!,
 	pianoroll.detectionRange = range;
 	updateDetectionStatus(range);
 	rebuildReferenceBars();
+	syncAIControls();
 });
 function updateDetectionStatus(range = detectionBar.range) {
 	const key = KEY_OPTIONS.find(key => key.id === editorOptions.keyValue);
@@ -228,10 +268,11 @@ const selectedAnchors = new Set<number>();
  * 使用者分不出是在跑還是當掉了。除了進度條，還要在軌道上標出「哪一段在重算」。
  */
 let diagnostics: Diagnostics | undefined;
-renderer.onProgress = f => {
-	diagnostics?.recordProgress();
-	renderProgress?.update('音訊算繪中', f);
-};
+function bindRendererCallbacks(target:Renderer){
+	target.onProgress=f=>{diagnostics?.recordProgress();renderProgress?.update('音訊算繪中',f);};
+	target.onBackground=syncBackgroundStatus;
+}
+bindRendererCallbacks(renderer);
 function showProgress(range: { start: number; end: number } | null) {
 	renderingRange = range;
 	if (range) {
@@ -254,23 +295,19 @@ bindPianoAudition(el.pianoKeys, midi => pianoroll.setPressedMidi(midi), error =>
 // ── 載入 ────────────────────────────────────────────────────────────────
 
 const loadReport = new LoadReportView(document.getElementById('load-timings') as HTMLDetailsElement);
-async function load(file: File, absolutePath: string | null = null): Promise<boolean> {
+async function load(file: File, absolutePath: string | null = null, writebackPath: string | null = absolutePath,
+	expected?:{audioSize?:number;audioSha256?:string;sampleRate:number;duration:number}): Promise<boolean> {
  if (!workState.canStart('load')) { hint('目前工作尚未完成，請等完成後再開啟音檔。'); return false; }
 
 	const task = workState.tryBegin('load', '讀取音檔');
 	if (!task) { hint('目前工作尚未完成，請等完成後再開啟音檔。'); return false; }
 	let success = false;
-	sourceAbsolutePath = null;
 	try {
-  const assetId = crypto.randomUUID();
-  await resetTrainingStaging(assetId);
-  aiRegions = []; aiReview = null; aiOverlay.clear();
-  stagedTrainingCount = 0;
-  trainingStatus.textContent = 'AI 訓練暫存已清空，等待手動修音';
-  trainingAsset = null;
-  success = await loadOnce(file, task);
+	  const assetId = crypto.randomUUID();
+	  success = await loadOnce(file, task, assetId, expected);
   if (success) {
    sourceAbsolutePath = absolutePath;
+   sourceWritebackPath = writebackPath;
    trainingAsset = { id: assetId, name: file.name, size: file.size, lastModified: file.lastModified };
   }
  } catch (error) {
@@ -283,47 +320,39 @@ async function load(file: File, absolutePath: string | null = null): Promise<boo
 	return success;
 }
 
-async function loadOnce(file: File, progress: WorkTask): Promise<boolean> {
+async function loadOnce(file: File, progress: WorkTask, assetId: string,
+	expected?:{audioSize?:number;audioSha256?:string;sampleRate:number;duration:number}): Promise<boolean> {
+	const previousAIReady=aiReady;
+	const previousBaseInfo=baseInfo;
 	aiReady = false;
 	const timings = new LoadTimings();
 	let success = false, releasedBytes = 0;
+	let candidateRenderer:Renderer|null=null;
 	let failureLabel = '讀取失敗';
 	let pitchPlanLabel = '';
 	const computeMode = computeControl.mode;
 	computeControl.start();
-	detectionBar.set(null);
 	loadReport.reset();
 	status(`解碼 ${file.name}…`);
 	try {
-		source = await decodeFile(file, (stage, fraction) => {
+		const candidateSource = await decodeFile(file, (stage, fraction) => {
 			timings.stage(stage);
 			progress.update(stage, fraction);
 		});
+		if(expected){
+			if(expected.audioSize!==undefined&&file.size!==expected.audioSize)throw new Error('音訊大小與檢測檔記錄不符');
+			if(expected.audioSha256!==undefined&&candidateSource.contentSha256!==expected.audioSha256)throw new Error('音訊內容指紋與檢測檔記錄不符');
+			if(candidateSource.sampleRate!==expected.sampleRate||Math.abs(candidateSource.duration-expected.duration)>.01)throw new Error('音訊規格與檢測檔記錄不符');
+		}
 
 		failureLabel = '初始化失敗';
-		timings.stage('建立波形');
-		view.duration = source.duration;
-		view.fit(el.waveform.clientWidth || 1200);
-		waveform.setSource(source);
-
-		// 中性音訊不需整段算繪，只有被編輯過的區域才需要進 Rubber Band。
-		progress.update('初始化音訊引擎');
-		timings.stage('初始化編輯引擎');
-		await renderer.init(source.channels, source.sampleRate);
-		timings.stage('初始化播放器');
-		player.setAudio(renderer.rendered, source.sampleRate);
-
-		el.stage.hidden = false;
-		el.globalBar.hidden = false;
-		transport.setEnabled(true);
-
-		baseInfo = `${source.name} · ${source.sampleRate}Hz · ${fmtTime(source.duration)}`;
+		baseInfo = `${candidateSource.name} · ${candidateSource.sampleRate}Hz · ${fmtTime(candidateSource.duration)}`;
 		status(`${baseInfo} · 偵測音高中…`);
 		failureLabel = '音高分析失敗';
 		progress.update('載入音高模型');
 		timings.stage('啟動音高分析 Worker 與傳輸音訊');
 		let backendLabel = computeMode === 'gpu' ? 'GPU 優先' : 'CPU';
-		const result = await analyseSource(source, audio => detectPitchParallel(audio, {
+		const result = await analyseSource(candidateSource, audio => detectPitchParallel(audio, {
 			onProgress: f => {
 			status(`${baseInfo} · 偵測音高中… ${(f * 100).toFixed(0)}%`);
 			progress.update('分析音高', f);
@@ -337,20 +366,36 @@ async function loadOnce(file: File, progress: WorkTask): Promise<boolean> {
 			pitchPlanLabel = `音高分段：${plan.segments} 段／${plan.workers} Worker（瀏覽器回報 ${plan.hardwareConcurrency} CPU 工作槽）／最低音壓窗 ${plan.quietWindowSeconds} 秒`;
 			console.info('[WiPitch] parallel pitch plan', plan);
 		} }));
-		track = result.track;
 		releasedBytes = result.releasedBytes;
 		timings.stage('準備編輯曲線');
 		failureLabel = '音高顯示初始化失敗';
-		pianoroll.setTrack(track);
-		curves = new Curves(track.length * CURVE_SUB);
-		manualBaseline = curves.clone();
-		history.reset(curves);
-		syncRampInputs();
+		const candidateTrack=result.track;
+		const candidateCurves=new Curves(candidateTrack.length*CURVE_SUB);
+		const candidatePitchMidi=upsample(candidateTrack.f0.map(hzToMidi));
+		const candidateVoiced=upsampleVoiced(candidateTrack.voiced);
+		const candidateFilled=fillGaps(candidatePitchMidi,candidateVoiced,0,candidatePitchMidi.length);
+		progress.update('初始化音訊引擎');
+		timings.stage('初始化編輯引擎');
+		candidateRenderer=new Renderer();
+		candidateRenderer.formantFollow=renderer.formantFollow;
+		await candidateRenderer.init(candidateSource.channels,candidateSource.sampleRate);
+		// 直到候選音檔、音高與 Renderer 全部成功，才清除上一個工作階段的暫存。
+		await resetTrainingStaging(assetId);
 
-		pitchMidi = upsample(track.f0.map(hzToMidi));
-		curveVoiced = upsampleVoiced(track.voiced);
-		pitchMidiFilled = fillGaps(pitchMidi, curveVoiced, 0, pitchMidi.length);
-		headerPanel.setActions({ canOpenAudio: true, canOpenProject: true, canExport: true, canSave: true });
+		const oldRenderer=renderer;
+		renderer=candidateRenderer;candidateRenderer=null;bindRendererCallbacks(renderer);oldRenderer.dispose();
+		source=candidateSource;track=candidateTrack;curves=candidateCurves;manualBaseline=curves.clone();
+		pitchMidi=candidatePitchMidi;curveVoiced=candidateVoiced;pitchMidiFilled=candidateFilled;
+		aiRegions=[];aiReview=null;aiOverlay.clear();aiPreviewCurves=null;
+		stagedTrainingCount=0;trainingAsset=null;
+		trainingStatus.textContent='AI 訓練暫存已清空，等待手動修音';
+		clearSelection();selectedAnchors.clear();detectionBar.set(null);removeReference(false);
+		history.reset(curves);syncRampInputs();pianoroll.setTrack(track);
+		view.duration=source.duration;view.fit(el.waveform.clientWidth||1200);waveform.setSource(source);
+		player.setAudio(renderer.rendered,renderer.sampleRate);
+		el.stage.hidden=false;el.globalBar.hidden=false;transport.setEnabled(true);
+		headerPanel.setActions({ canOpenAudio: true, canOpenProject: true, canExport: true,
+			canOverwrite: false, canSave: true });
 		diagnostics?.applyViewParams();
 		status(baseInfo);
 		progress.finish('讀取與音高分析完成');
@@ -359,9 +404,12 @@ async function loadOnce(file: File, progress: WorkTask): Promise<boolean> {
 		hint('拖曳選取一段，用面板調整；1/2/3 切換音高・音量・Formant，B 切畫筆');
 	} catch (e) {
 		const message = `${failureLabel}：${e instanceof Error ? e.message : String(e)}`;
+		baseInfo=previousBaseInfo;
 		status(message);
 		progress.finish(message, true);
 	} finally {
+		candidateRenderer?.dispose();
+		if(!success)aiReady=previousAIReady;
 		computeControl.finish(success);
 		const report = { file: file.name, fileBytes: file.size, mode: computeMode, success, releasedAnalysisBytes: releasedBytes, ...timings.finish() };
 		loadReport.show(`載入耗時 ${(report.totalMs / 1000).toFixed(2)} 秒${success ? '' : '（失敗）'}`, [
@@ -378,8 +426,8 @@ async function loadOnce(file: File, progress: WorkTask): Promise<boolean> {
 
 async function openLocalAudio() {
 	if (!workState.canStart('load')) { hint('目前工作尚未完成，請等完成後再開啟音檔。'); return; }
-	// 靜態部署及手機連線使用瀏覽器選檔，保留使用者手勢以相容 Safari。
-	if (!import.meta.env.DEV || !['localhost', '127.0.0.1'].includes(location.hostname)) {
+	// 非本機或不具本機檔案 API 的靜態部署使用瀏覽器選檔。
+	if (!['localhost', '127.0.0.1'].includes(location.hostname)||!await hasLocalFileAccess()) {
 		document.querySelector<HTMLInputElement>('#file')!.click();
 		return;
 	}
@@ -387,7 +435,13 @@ async function openLocalAudio() {
 		const picked = await pickLocalAudio();
 		if (!picked) { hint('已取消開啟音檔'); return; }
 		const file = await readLocalAudio(picked.path, picked);
-		await load(file, picked.path);
+		if(await load(file,picked.path)){
+			try{
+				const detectionFile=await findLocalDetectionFile(picked.path);
+				if(detectionFile){hint(`找到同目錄檢測檔案 ${detectionFile.name}，正在一併載入…`);await openProject(detectionFile,true);}
+				else hint('音檔已開啟；同目錄沒有相同檔名的 .wipitch.json');
+			}catch(error){hint(`音檔已開啟，但自動讀取檢測檔案失敗：${error instanceof Error?error.message:String(error)}`);}
+		}
 	} catch (error) {
 		hint(`開啟音檔失敗：${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -1181,36 +1235,72 @@ async function exportWav() {
 	} finally { task.finish('匯出工作已結束'); }
 	}
 
-function saveProject() {
+async function overwriteOriginalAudio() {
+	if(!source||!sourceWritebackPath)return;
+	if(!window.confirm(`確定要用目前修改後的聲音覆寫「${sourceWritebackPath.split('/').pop() ?? source.name}」？\n系統會保留一份原始音檔安全備份。`))return;
+	const task=workState.tryBegin('export','準備回存原檔');if(!task)return;
+	try{
+		if(workState.has('background')){hint('背景精算中，完成後會自動回存原檔…');task.update('等待背景精算');await waitBackground();}
+		task.update('編碼與回存原音檔');
+		const result=await overwriteLocalAudio(sourceWritebackPath,encodeWav24(renderer.rendered,renderer.sampleRate));
+		// 檢測檔改指向覆寫前的安全備份，避免日後讀取時把同一組修正重複套用到已修正音訊。
+		sourceAbsolutePath=result.backupPath;
+		try{
+			await writeLocalDetectionFile(sourceWritebackPath,createProjectText());
+		}catch(error){
+			throw new Error(`音訊已回存且原始聲音已備份，但檢測檔同步失敗：${error instanceof Error?error.message:String(error)}；請立即按「儲存檢測檔案」重試`);
+		}
+		hint(`已回存原檔 ${result.path.split('/').pop()}，並同步檢測檔；原始聲音備份於 ${result.backupPath.split('/').pop()}`);
+		task.finish('修改後音訊已回存原檔');
+	}catch(error){const message=`回存原檔失敗：${error instanceof Error?error.message:String(error)}`;hint(message);task.finish(message,true);}
+	finally{task.finish('回存原檔工作已結束');}
+}
+
+async function saveProject() {
 	if (!source || !curves || workState.blocksEditing) return;
 	if (!sourceAbsolutePath) {
 		hint('無法存檔：目前音訊沒有絕對路徑，請用「開啟音檔」重新選擇原始音訊');
 		return;
 	}
 	const name = source.name.replace(/\.[^.]+$/, '') + '.wipitch.json';
-	const text = serialize(curves, source.name, sourceAbsolutePath, source.sampleRate, source.duration, renderer.formantFollow,
-		ref.name ? { name: ref.name, gainDb: ref.gainDb, muted: ref.muted, offsetSec: ref.offsetSec,
-			beatAnchorSec: ref.beatAnchorSec ?? ref.beatAnchorSecs.at(-1) ?? null, beatAnchorSecs: ref.beatAnchorSecs,
-			tempoBpm: Number(tempoBpm.value),
-			tempoMeter: tempoMeter.value, tempoTolerancePercent: Number(tempoTolerance.value),
-			onsetProminenceThreshold: Number(onsetProminence.value),
-			beatConfirmationThreshold: Number(beatConfirmation.value),
-			barStartsSec: referenceBarStarts, virtualBarStartsSec: referenceVirtualBarStarts,
-			beatRecords: referenceBeatRecords } : undefined);
-	downloadBlob(new Blob([text], { type: 'application/json' }), name);
-	hint(`已存檔 ${name}`);
+	const text=createProjectText();
+	try{
+		const saved=await writeLocalDetectionFile(sourceWritebackPath??sourceAbsolutePath,text);
+		hint(`已儲存檢測檔案 ${saved.name}（${aiRegions.length} 個黃框、${referenceBeatRecords.length} 筆拍點／和弦紀錄）`);
+	}catch(error){
+		downloadBlob(new Blob([text], { type: 'application/json' }), name);
+		hint(`無法直接寫入原音檔目錄，已改為下載 ${name}：${error instanceof Error?error.message:String(error)}`);
 	}
+}
 
-async function openProject(f: File) {
+function createProjectText():string{
+	if(!source||!curves||!sourceAbsolutePath)throw new Error('目前沒有可儲存的完整工作階段');
+	const background:BackgroundSettings|undefined=ref.name ? { name: ref.name,
+		fileSize:ref.fileSize??undefined,lastModified:ref.lastModified??undefined,
+		gainDb: ref.gainDb, muted: ref.muted, offsetSec: ref.offsetSec,
+		beatAnchorSec: ref.beatAnchorSec ?? ref.beatAnchorSecs.at(-1) ?? null, beatAnchorSecs: ref.beatAnchorSecs,
+		tempoBpm: Number(tempoBpm.value),tempoMeter: tempoMeter.value, tempoTolerancePercent: Number(tempoTolerance.value),
+		instrumentProfile:referenceInstrumentProfile.value==='rhythm'?'rhythm':'melody',
+		onsetProminenceThreshold: Number(onsetProminence.value),beatConfirmationThreshold: Number(beatConfirmation.value),
+		barStartsSec: referenceBarStarts, virtualBarStartsSec: referenceVirtualBarStarts,
+		beatRecords: referenceBeatRecords } : pendingRefSettings ?? undefined;
+	return serialize(curves, source.name, sourceAbsolutePath, source.sampleRate, source.duration, renderer.formantFollow,
+		background,{detectionRange:detectionBar.range?{...detectionBar.range}:null,aiRegions},sourceWritebackPath??sourceAbsolutePath,
+		trainingAsset?.size,source.contentSha256);
+}
+
+async function openProject(f: File,reuseLoadedAudio=false) {
  if(aiRegions.length){hint('請先按「完成工作」，再讀取專案');return;}
 	let progress: WorkTask | null = null;
+	let candidateRenderer:Renderer|null=null;
 	try {
 		const text = await f.text();
 		const projectSource = inspectProject(text);
-		if (projectSource.audioPath) {
+		const canReuseLoadedAudio=reuseLoadedAudio&&projectSource.audioPath===sourceAbsolutePath;
+		if (projectSource.audioPath&&!canReuseLoadedAudio) {
 			hint(`正在依專案路徑開啟 ${projectSource.audioName}…`);
 			const audioFile = await readLocalAudio(projectSource.audioPath);
-			if (!await load(audioFile, projectSource.audioPath)) throw new Error('專案記錄的原始音訊載入失敗');
+			if (!await load(audioFile, projectSource.audioPath, projectSource.audioWritebackPath ?? projectSource.audioPath,projectSource)) throw new Error('檢測檔案記錄的原始音訊載入失敗');
 		} else if (!source || !track) {
 			throw new Error('這是舊版專案，沒有保存音訊路徑；請先開啟對應的原始音檔，再重新讀檔');
 		}
@@ -1219,25 +1309,31 @@ async function openProject(f: File) {
 		if (!progress) throw new Error('目前工作尚未完成，請稍後再讀檔');
 		const loaded = deserialize(text, source.sampleRate, track.length);
 		progress.update('專案讀取完成，準備算繪');
-		history.push(curves!);
-		curves = loaded.curves;
-		// 模式是全域設定，也要跟著專案檔回來——不然讀檔後聲音會跟存檔前不一樣
-		renderer.formantFollow = loaded.formantFollow;
-		headerPanel.setFormantFollow(loaded.formantFollow === 1 ? 1 : 0);
-		syncRampInputs();
-		clearSelection();
-		selectedAnchors.clear();
-		// 曲線整個換掉了，只好整段重算
+		// 先用候選 Renderer 完成整段算繪；失敗時不替換目前曲線與播放音訊。
+		candidateRenderer=new Renderer();candidateRenderer.formantFollow=loaded.formantFollow;
+		bindRendererCallbacks(candidateRenderer);await candidateRenderer.init(source.channels,source.sampleRate);
 		hint('讀檔：整段重新算繪中…（可能要十幾秒）');
-		view.duration = outDuration();
-		showProgress({ start: 0, end: outDuration() });
+		const candidateDuration=loaded.curves.timeMap.srcToOut(source.duration);
+		showProgress({ start: 0, end: candidateDuration });
 		const t0 = performance.now();
-		await renderer.renderAll(curves);
+		await candidateRenderer.renderAll(loaded.curves);
+		history.push(curves!);
+		const oldRenderer=renderer;renderer=candidateRenderer;candidateRenderer=null;bindRendererCallbacks(renderer);oldRenderer.dispose();
+		curves = loaded.curves;
+		headerPanel.setFormantFollow(loaded.formantFollow === 1 ? 1 : 0);
+		syncRampInputs();clearSelection();selectedAnchors.clear();
+		view.duration = outDuration();
 		player.setAudio(renderer.rendered, renderer.sampleRate);
 		manualBaseline = curves?.clone() ?? null;
+		aiRegions=loaded.inspection?.aiRegions??[];aiReview=null;aiOverlay.clear();
+		detectionBar.set(loaded.inspection?.detectionRange??null);
+		if(aiRegions.length){setActiveLane('pitch');setTool('select');}
 		let refNote = '';
 		const bgSaved = loaded.background;
-		if (bgSaved && bgSaved.name === ref.name) {
+		const sameLoadedReference = !!bgSaved && bgSaved.name === ref.name
+			&& (bgSaved.fileSize === undefined || bgSaved.fileSize === ref.fileSize)
+			&& (bgSaved.lastModified === undefined || bgSaved.lastModified === ref.lastModified);
+		if (bgSaved && sameLoadedReference) {
 			// 同一個背景已經載入了，直接套用設定
 			ref.gainDb = bgSaved.gainDb; ref.muted = bgSaved.muted; ref.offsetSec = bgSaved.offsetSec;
 			restoreReferenceAnchors(bgSaved);
@@ -1248,6 +1344,7 @@ async function openProject(f: File) {
 			if (bgSaved.tempoBpm) tempoBpm.value = String(bgSaved.tempoBpm);
 			if (bgSaved.tempoMeter) tempoMeter.value = bgSaved.tempoMeter;
 			if (bgSaved.tempoTolerancePercent) tempoTolerance.value = String(bgSaved.tempoTolerancePercent);
+			if (bgSaved.instrumentProfile==='rhythm'||bgSaved.instrumentProfile==='melody') referenceInstrumentProfile.value=bgSaved.instrumentProfile;
 			if (bgSaved.onsetProminenceThreshold) onsetProminence.value = String(bgSaved.onsetProminenceThreshold);
 			if (bgSaved.beatConfirmationThreshold) beatConfirmation.value = String(bgSaved.beatConfirmationThreshold);
 			if (ref.beatAnchorSec !== null && referenceBarStarts.length) syncedReferenceRhythm = {
@@ -1256,9 +1353,10 @@ async function openProject(f: File) {
 			};
 			applyRefToPlayer();
 		} else if (bgSaved) {
+			removeReference(false);
 			pendingRefSettings = bgSaved;
 			refNote = `；專案有參考音軌 ${bgSaved.name}，請在下方參考音軌按「載入參考音軌」（設定會自動套用）`;
-		}
+		} else removeReference(false);
 		hint(`讀檔完成（算繪 ${((performance.now() - t0) / 1000).toFixed(1)}s）${refNote}`);
 		finishRenderProgress('專案讀取與算繪完成');
 		progress.finish('專案讀取與算繪完成');
@@ -1267,6 +1365,7 @@ async function openProject(f: File) {
 		progress?.finish(`讀檔失敗：${(e as Error).message}`, true);
 		finishRenderProgress(`讀檔失敗：${(e as Error).message}`, true);
 	} finally {
+		candidateRenderer?.dispose();
 		showProgress(null);
 		progress?.finish('專案讀取工作已結束');
 	}
@@ -1330,6 +1429,8 @@ async function rerender(fromSec: number, toSec: number, label: string, manualRan
    const nextId=aiRegions.reduce((id,region)=>Math.max(id,region.id+1),0);
    const region=createManualAIRegion(before,afterCurves,from,to,nextId);region.feedbackKey=keySelection;
    aiRegions.push(region);
+   const run=aiReview.runs.find(candidate=>rangesOverlap(candidate.input.range,manualRange))??aiReview.runs.at(-1);
+   if(run)aiReview.sources.set(region.id,{input:run.input,proposal:before.clone(),keyLabel:run.keyLabel});
    if(capture)aiReview.audio.set(region.id,{start:clipStart,end:clipEnd,channels:beforeAudio});
    trainingStatus.textContent=exceedsTrainingLimit
     ? '人工黃框已建立；範圍超過 5 秒，完成工作時會依既有黃框規則略過訓練資料'
@@ -1398,7 +1499,6 @@ async function runBackground() {
 	} finally { syncBackgroundStatus(); }
 }
 
-renderer.onBackground = syncBackgroundStatus;
 function syncBackgroundStatus() {
 	const p = renderer.backgroundProgress;
 	const waiting = !!bgTimer && !!bgPendingRange;
@@ -1543,21 +1643,46 @@ el.refAmpZoom.value = String(ampToFraction(1));
 el.refAmpZoom.addEventListener('input', () => setRefAmpZoom(fractionToAmp(parseFloat(el.refAmpZoom.value))));
 el.refAmpZoom.addEventListener('dblclick', () => setRefAmpZoom(1));
 
-let refBeatDrag: { pointerId: number; firstBeatSec: number; original: ReferenceBeatRecord[]; bars: number[]; virtualBars: number[]; anchors: number[]; startTime: number } | null = null;
+let refBeatDrag: { pointerId: number; firstBeatSec: number; original: ReferenceBeatRecord[]; bars: number[]; virtualBars: number[]; anchors: number[]; startTime: number; moved:boolean } | null = null;
+function editReferenceChord(row:ReferenceBeatRecord){
+	const entered=window.prompt('輸入此拍的和弦；留空可清除和弦',row.chord??'');
+	if(entered===null)return;
+	const chord=entered.trim();
+	const pitchClasses=chordPitchClasses(chord||undefined);
+	if(chord&&!pitchClasses.length){
+		hint('和弦格式無法辨識；可使用 F#m、B♭、Cadd9、maj7、m7、7、dim、aug、sus2 或 sus4');
+		return;
+	}
+	if(!row.chordEdited)row.originalChord=row.chord;
+	row.chord=chord||undefined;row.chordEdited=true;
+	row.pitchClasses=pitchClasses;
+	row.pitchNames=row.pitchClasses.map(value=>['C','C♯','D','E♭','E','F','F♯','G','A♭','A','B♭','B'][value]);
+	if(syncedReferenceRhythm?.beatHarmony){const beat=syncedReferenceRhythm.beatHarmony.reduce<typeof syncedReferenceRhythm.beatHarmony[number]|undefined>((nearest,candidate)=>
+		Math.abs(candidate.timeSec-row.timeSec)<Math.abs((nearest?.timeSec??Infinity)-row.timeSec)?candidate:nearest,undefined);
+		if(beat&&Math.abs(beat.timeSec-row.timeSec)<.05){beat.chord=row.chord;beat.pitchClasses=[...row.pitchClasses];beat.pitchNames=[...row.pitchNames];}}
+	document.getElementById('ref-beat-status')!.textContent=`已人工修改 ${fmtTime(row.timeSec)} 的和弦${chord?`為 ${chord}`:'（已清除）'}`;
+	hint('和弦已人工修改；底色保留原標記顏色、文字改為白色，並會寫入檢測檔案');
+}
+function referenceBeatAtPointer(e:PointerEvent):ReferenceBeatRecord|null{
+	const rect=el.refwave.getBoundingClientRect(),x=e.clientX-rect.left,y=e.clientY-rect.top;
+	if(y<el.refwave.clientHeight-24)return null;
+	let selected:ReferenceBeatRecord|null=null,distance=Infinity;
+	for(const row of referenceBeatRecords){
+		const dx=Math.abs(view.timeToX(row.timeSec)-x),hitWidth=Math.max(10,(row.chord?.length??0)*4+7);
+		if(dx<=hitWidth&&dx<distance){selected=row;distance=dx;}
+	}
+	return selected;
+}
 // 參考音軌底部的紅色第一拍可拖動；其他位置維持既有選取／定位操作。
 el.refwave.addEventListener('pointerdown', e => {
 	if (!source) return;
 	const t = Math.max(0, Math.min(outDuration(), view.xToTime(e.clientX - el.refwave.getBoundingClientRect().left)));
-	if (!workState.isBusy && ref.name && referenceBeatRecords.length && e.clientY - el.refwave.getBoundingClientRect().top >= el.refwave.clientHeight - 19) {
-		let firstBeatSec: number | null = null, distance = 8;
-		for (const row of referenceBeatRecords) {
-			if (row.beatInBar !== 1) continue;
-			const dx = Math.abs(view.timeToX(row.timeSec) - (e.clientX - el.refwave.getBoundingClientRect().left));
-			if (dx < distance) { firstBeatSec = row.timeSec; distance = dx; }
-		}
-		if (firstBeatSec !== null) {
-			refBeatDrag = { pointerId: e.pointerId, firstBeatSec, original: referenceBeatRecords,
-				bars: [...referenceBarStarts], virtualBars: [...referenceVirtualBarStarts], anchors: [...ref.beatAnchorSecs], startTime: t };
+	if (!workState.isBusy && ref.name && referenceBeatRecords.length) {
+		const marker=referenceBeatAtPointer(e);
+		if(marker&&marker.beatInBar!==1){editReferenceChord(marker);return;}
+		if(marker) {
+			refBeatDrag = { pointerId: e.pointerId, firstBeatSec:marker.timeSec, original: referenceBeatRecords,
+				bars: [...referenceBarStarts], virtualBars: [...referenceVirtualBarStarts], anchors: [...ref.beatAnchorSecs], startTime: t,moved:false };
 			el.refwave.setPointerCapture(e.pointerId);
 			return;
 		}
@@ -1582,6 +1707,7 @@ el.refwave.addEventListener('pointermove', e => {
 		const minimum = previous ? previous.timeSec + 0.05 - drag.firstBeatSec : -drag.firstBeatSec;
 		const maximum = ref.offsetSec + (referenceCache?.duration ?? 0) - last.timeSec;
 		const shift = Math.max(minimum, Math.min(maximum, t - drag.startTime));
+		drag.moved=drag.moved||Math.abs(shift)>.005;
 		referenceBeatRecords = shiftReferenceBeats(drag.original, shift, drag.firstBeatSec - 0.001);
 		referenceBarStarts = drag.bars.map(bar => bar >= drag.firstBeatSec - 0.001 ? bar + shift : bar);
 		referenceVirtualBarStarts = drag.virtualBars.map(bar => bar >= drag.firstBeatSec - 0.001 ? bar + shift : bar);
@@ -1594,6 +1720,7 @@ el.refwave.addEventListener('pointermove', e => {
 });
 el.refwave.addEventListener('pointerup', e => {
 	if (refBeatDrag?.pointerId === e.pointerId) {
+		const drag=refBeatDrag;
 		refBeatDrag = null;
 		el.refwave.releasePointerCapture(e.pointerId);
 		if (syncedReferenceRhythm) syncedReferenceRhythm = { ...syncedReferenceRhythm,
@@ -1601,6 +1728,8 @@ el.refwave.addEventListener('pointerup', e => {
 			virtualBarStartsSec: [...referenceVirtualBarStarts] };
 		const average = averageBarBpm(referenceBarStarts, Number(tempoBpm.value), tempoMeter.value);
 		if (average !== null && !averageBpmOutput.hidden) averageBpmOutput.textContent = `範圍平均 BPM ${average.toFixed(1)}`;
+		if(!drag.moved){const row=referenceBeatRecords.reduce<ReferenceBeatRecord|null>((nearest,candidate)=>
+			Math.abs(candidate.timeSec-drag.firstBeatSec)<Math.abs((nearest?.timeSec??Infinity)-drag.firstBeatSec)?candidate:nearest,null);if(row)editReferenceChord(row);}
 		return;
 	}
 	waveSelectEnd(el.refwave, e.pointerId);
@@ -1620,11 +1749,11 @@ el.refwave.addEventListener('pointercancel', e => {
 // 修主唱時一邊聽伴奏才知道對不對得準。只用來監聽：不跟著錨點伸縮、不會匯出。
 // 存檔只記設定，讀檔後請使用者重新載入同名檔。
 
-const ref = { name: null as string | null, gainDb: 0, muted: false, offsetSec: 0,
+const ref = { name: null as string | null, fileSize: null as number | null, lastModified: null as number | null,
+	gainDb: 0, muted: false, offsetSec: 0,
 	beatAnchorSec: null as number | null, beatAnchorSecs: [] as number[] };
 let referenceCache: ReferenceCache | null = null;
 let rhythmGeneration = 0;
-let referenceSyncEnabled = false;
 let referenceBarStarts: number[] = [];
 let referenceVirtualBarStarts: number[] = [];
 let referenceBeatRecords: ReferenceBeatRecord[] = [];
@@ -1693,29 +1822,6 @@ function clearReferenceBeatRange(range: { start: number; end: number }): number 
 	return before - referenceBeatRecords.length;
 }
 
-/** 放棄 AI 結果時，只移除該次同步分析產生的拍點，不移除使用者設定的錨點。 */
-function clearAIReferenceBeatRange(range: { start: number; end: number } | null): number {
-	if (!range) return 0;
-	const before = referenceBeatRecords.length;
-	referenceBeatRecords = clearReferenceBeatsInRange(referenceBeatRecords, range);
-	++rhythmGeneration;
-	referenceBarStarts = referenceBarStarts.filter(time => !referenceBeatInRange(time, range));
-	referenceVirtualBarStarts = referenceVirtualBarStarts.filter(time => !referenceBeatInRange(time, range));
-	referenceBeatsCommitted = referenceBeatRecords.length > 0;
-	syncedReferenceRhythm = null;
-	if (lastReferenceAnalysisRange?.start === range.start && lastReferenceAnalysisRange.end === range.end) {
-		lastReferenceAnalysisRange = null;
-	}
-	averageBpmOutput.hidden = true;
-	averageBpmOutput.textContent = '';
-	const removed = before - referenceBeatRecords.length;
-	document.getElementById('ref-beat-status')!.textContent = referenceBeatRecords.length
-		? `已記錄 ${referenceBeatRecords.length} 拍 · 本次 AI 拍點已清除`
-		: '本次 AI 檢測產生的拍點已清除';
-	syncRefUi();
-	return removed;
-}
-
 anchorButton.addEventListener('click', () => {
 	if (!referenceCache || workState.blocksEditing) { hint('請先載入參考音軌並等待前景工作完成'); return; }
 	const range = currentDetectionRange();
@@ -1755,10 +1861,14 @@ const tempoMeter = document.getElementById('tempo-meter') as HTMLSelectElement;
 const tempoTolerance = document.getElementById('tempo-tolerance') as HTMLInputElement;
 const onsetProminence = document.getElementById('onset-prominence') as HTMLInputElement;
 const beatConfirmation = document.getElementById('beat-confirmation') as HTMLInputElement;
+const referenceInstrumentProfile=document.getElementById('reference-instrument-profile') as HTMLSelectElement;
+referenceInstrumentProfile.addEventListener('change',()=>hint(referenceInstrumentProfile.value==='rhythm'
+	?'參考拍點模式：節奏樂器，優先快速且明顯的瞬間起音'
+	:'參考拍點模式：旋律樂器，同時評估較慢、較小的音量上升'));
 tempoBpm.addEventListener('change', rebuildReferenceBars);
 tempoMeter.addEventListener('change', rebuildReferenceBars);
 tempoTolerance.addEventListener('change', () => {
-	const value = Math.max(1, Math.min(25, Number(tempoTolerance.value) || 5));
+	const value = Math.max(1, Math.min(10, Number(tempoTolerance.value) || 5));
 	tempoTolerance.value = String(value);
 });
 onsetProminence.addEventListener('change', () => {
@@ -1790,13 +1900,8 @@ function rebuildReferenceBars() {
 		Math.max(range.start, 0, ref.offsetSec), Math.min(range.end, referenceCache.duration + ref.offsetSec));
 	syncReferenceButton();
 }
-syncButton.addEventListener('click', () => {
-	if (syncButton.disabled) return;
-	referenceSyncEnabled = !referenceSyncEnabled;
-	syncReferenceButton();
-	hint(referenceSyncEnabled ? '已啟用同步參考音軌；按 AI 檢測後分析反白範圍' : '已關閉同步參考音軌');
-});
-async function analyzeSynchronizedTracks(): Promise<boolean> {
+syncButton.addEventListener('click', () => { if(!syncButton.disabled)void analyzeReferenceTrack(); });
+async function analyzeReferenceTrack(): Promise<boolean> {
 	if (workState.isBusy) return false;
 	const selectedRange = detectionBar.range;
 	if (!selectedRange || selectedRange.end <= selectedRange.start) { hint('請先在檢測列標示反白範圍'); return false; }
@@ -1813,88 +1918,54 @@ async function analyzeSynchronizedTracks(): Promise<boolean> {
 	if (b <= a) { hint('檢測範圍與參考音軌沒有重疊'); return false; }
 	const rough = Number(tempoBpm.value);
 	if (!Number.isFinite(rough) || rough < 30 || rough > 300) { hint('BPM 請輸入 30～300'); return false; }
-	const tolerancePercent = Math.max(1, Math.min(25, Number(tempoTolerance.value) || 5));
+	const tolerancePercent = Math.max(1, Math.min(10, Number(tempoTolerance.value) || 5));
 	tempoTolerance.value = String(tolerancePercent);
 	const prominenceThreshold = Math.max(0.5, Math.min(3, Number(onsetProminence.value) || 0.65));
 	const confirmationThreshold = Math.max(0.3, Math.min(0.9, Number(beatConfirmation.value) || 0.58));
 	onsetProminence.value = prominenceThreshold.toFixed(2);
 	beatConfirmation.value = confirmationThreshold.toFixed(2);
 	const audio = referenceCache.mono16k.slice(Math.ceil(a * 16000), Math.floor(b * 16000));
-	if (!source || !curves || !track) { hint('請先載入主音軌'); return false; }
-	const task = workState.tryBegin('reference', '並行分析主音高、參考音高與節拍');
+	const task = workState.tryBegin('reference', '分析參考音軌節拍與和弦');
 	if (!task || !referenceCache) return false;
 	referenceBeatsCommitted = false;
 	const generation = ++rhythmGeneration;
-	const mainSource = source, mainTrack = track;
-	const srcStart = curves.timeMap.outToSrc(range.start), srcEnd = curves.timeMap.outToSrc(range.end);
-	const mainStart = Math.floor(srcStart * 16000 / 256) * 256 / 16000;
 	const offset = ref.offsetSec, anchorSec = rangeAnchor, meter = tempoMeter.value;
-	const mode = computeControl.mode;
-	const workerLimit = Math.max(1, Math.floor(availableParallelWorkers(mode === 'gpu' ? 'gpu' : 'cpu') / 2));
-	const mainTask = workState.begin('main-pitch', '主音軌：準備多 Worker 音高分析');
-	const referenceTask = workState.begin('reference-pitch', '參考音軌：多 Worker 音高分析');
-	const rhythmTask = workState.begin('rhythm', '節拍：獨立 Worker 依序追蹤');
 	syncButton.disabled = true;
 	try {
-		const result = await concurrentAnalysis({
-			mainPitch: async () => {
-				try { return await detectPitchParallel(await sourceRangeMono16k(mainSource, mainStart, srcEnd), {
-					mode, workerLimit, onProgress: f => mainTask.update('主音軌：多 Worker 音高分析', f),
-				}); } finally { mainTask.finish('主音軌音高工作結束'); }
-			},
-			referencePitch: async () => {
-				try { return await detectPitchParallel(audio, { mode, workerLimit,
-					onProgress: f => referenceTask.update('參考音軌：多 Worker 音高分析', f),
-				}); } finally { referenceTask.finish('參考音軌音高工作結束'); }
-			},
-			rhythm: async () => {
-				try { return await detectReferenceRhythm({ audio,
-					anchorSec: anchorSec - offset - a, bpm: rough, meter, bpmTolerance: tolerancePercent / 100,
-					onsetProminence: prominenceThreshold, confirmationThreshold,
-				}); } finally { rhythmTask.finish('節拍追蹤工作結束'); }
-			},
-		});
+		task.update('分析參考音軌節拍');
+		const rhythm=await detectLibrosaRhythm({audio,anchorSec:anchorSec-offset-a,bpm:rough,meter,
+			bpmTolerance:tolerancePercent/100,onsetProminence:prominenceThreshold,confirmationThreshold,
+			instrumentProfile:referenceInstrumentProfile.value==='rhythm'?'rhythm':'melody'});
+		task.update('分析每拍和弦');
+		const beatTimes=(rhythm.beatTimesSec?.length ? rhythm.beatTimesSec
+			: referenceBeatGrid(rhythm.barStartsSec,rhythm.bpm,meter).map(marker=>marker.time))
+			.filter(time=>time>=0&&time<audio.length/16000);
+		const harmony=await detectLibrosaBeatHarmony(audio,16000,beatTimes,60/rhythm.bpm);
+		if(harmony)rhythm.beatHarmony=harmony;
 		if (generation !== rhythmGeneration) return false;
-		tempoBpm.value = String(result.rhythm.bpm);
-		const analyzedAnchor = result.rhythm.anchorSec + offset + a;
+		tempoBpm.value = String(rhythm.bpm);
+		const analyzedAnchor = rhythm.anchorSec + offset + a;
 		setReferenceAnchor(range, analyzedAnchor);
-		referenceBarStarts = result.rhythm.barStartsSec.map(t => t + offset + a);
-		referenceVirtualBarStarts = result.rhythm.virtualBarStartsSec.map(t => t + offset + a);
-		syncedReferenceRhythm = { bpm: result.rhythm.bpm, meter, anchorSec: analyzedAnchor, barStartsSec: [...referenceBarStarts],
-			virtualBarStartsSec: [...referenceVirtualBarStarts] };
+		referenceBarStarts = rhythm.barStartsSec.map(t => t + offset + a);
+		referenceVirtualBarStarts = rhythm.virtualBarStartsSec.map(t => t + offset + a);
+		syncedReferenceRhythm = { bpm: rhythm.bpm, meter, anchorSec: analyzedAnchor, barStartsSec: [...referenceBarStarts],
+			virtualBarStartsSec: [...referenceVirtualBarStarts],
+			beatTimesSec: rhythm.beatTimesSec?.map(time => time + offset + a),
+			virtualBeatTimesSec: rhythm.virtualBeatTimesSec?.map(time => time + offset + a),
+			beatHarmony: rhythm.beatHarmony.map(beat => ({ ...beat, timeSec: beat.timeSec + offset + a,
+				pitchClasses: [...beat.pitchClasses], pitchNames: [...beat.pitchNames] })) };
 		lastReferenceAnalysisRange = range;
-		const average = averageBarBpm(referenceBarStarts, result.rhythm.bpm, meter);
+		commitReferenceBeatRecords();referenceBeatsCommitted=referenceBeatRecords.length>0;
+		const average = averageBarBpm(referenceBarStarts, rhythm.bpm, meter);
 		averageBpmOutput.textContent = average === null
-			? `初始 BPM ${result.rhythm.bpm.toFixed(1)}`
+			? `初始 BPM ${rhythm.bpm.toFixed(1)}`
 			: `範圍平均 BPM ${average.toFixed(1)}`;
 		averageBpmOutput.hidden = false;
 		document.getElementById('ref-beat-status')!.textContent = `已分析 · BPM ±${tolerancePercent}% · 突出 ${prominenceThreshold.toFixed(2)} · 確認 ${confirmationThreshold.toFixed(2)} · ${referenceBarStarts.length} 個小節起點 · ${referenceVirtualBarStarts.length} 個虛擬拍點`;
-		{
-			const track = result.referencePitch;
-			const pitch: { timeSec: number; midi: number }[] = [];
-			for (let i = 0; i < track.length; i += 6) {
-				const timeSec = a + ref.offsetSec + (i * 256 + 127.5) / 16000;
-				if (track.voiced[i] && timeSec >= range.start && timeSec <= range.end) pitch.push({ timeSec, midi: hzToMidi(track.f0[i]) });
-			}
-			syncedReferenceRhythm.pitch = pitch;
-		}
-		// 局部分析以原始時間格對齊，只提交檢測範圍內的主音高格。
-		const frameOffset = Math.round(mainStart * 16000 / 256);
-		for (let i = 0; i < result.mainPitch.length && frameOffset + i < mainTrack.length; i++) {
-			const time = mainStart + (i * 256 + 127.5) / 16000;
-			if (time < srcStart || time > srcEnd) continue;
-			mainTrack.f0[frameOffset + i] = result.mainPitch.f0[i];
-			mainTrack.voiced[frameOffset + i] = result.mainPitch.voiced[i];
-			mainTrack.confidence[frameOffset + i] = result.mainPitch.confidence[i];
-		}
-		pitchMidi = upsample(mainTrack.f0.map(hzToMidi));
-		curveVoiced = upsampleVoiced(mainTrack.voiced);
-		pitchMidiFilled = fillGaps(pitchMidi, curveVoiced, 0, pitchMidi.length);
-		pianoroll.setTrack(mainTrack);
-		hint(`三項並行分析完成：${result.rhythm.bpm} BPM・${referenceBarStarts.length} 個小節起點`);
+		hint(`參考音軌分析完成：${rhythm.bpm} BPM・${referenceBarStarts.length} 個小節起點・${referenceBeatRecords.filter(row=>row.chord).length} 筆和弦`);
 		return true;
 	} catch (error) {
-		const message = `並行分析失敗：${error instanceof Error ? error.message : String(error)}`;
+		const message = `參考音軌分析失敗：${error instanceof Error ? error.message : String(error)}`;
 		hint(message); task.finish(message, true);
 		return false;
 	}
@@ -1921,6 +1992,9 @@ const referenceControls = new ReferenceTrackControlsView(document.getElementById
 			anchorSec: syncedReferenceRhythm.anchorSec + shift,
 			barStartsSec: syncedReferenceRhythm.barStartsSec.map(t => t + shift),
 			virtualBarStartsSec: syncedReferenceRhythm.virtualBarStartsSec?.map(t => t + shift),
+			beatTimesSec: syncedReferenceRhythm.beatTimesSec?.map(t => t + shift),
+			virtualBeatTimesSec: syncedReferenceRhythm.virtualBeatTimesSec?.map(t => t + shift),
+			beatHarmony: syncedReferenceRhythm.beatHarmony?.map(beat => ({ ...beat, timeSec: beat.timeSec + shift })),
 			pitch: syncedReferenceRhythm.pitch?.map(point => ({ ...point, timeSec: point.timeSec + shift })),
 		};
 		referenceVirtualBarStarts = referenceVirtualBarStarts.map(t => t + shift);
@@ -1944,22 +2018,22 @@ function syncRefUi() {
 	anchorButton.classList.toggle('set', ref.beatAnchorSecs.length > 0);
 }
 function syncReferenceButton() {
-	syncButton.disabled = !ref.name || !referenceCache || workState.isBusy;
 	const range = currentDetectionRange();
+	const rangeAnchor=referenceAnchorInRange(range);
+	syncButton.disabled = !ref.name || !referenceCache || workState.isBusy || !range || rangeAnchor===null || hasReferenceBeatsInRange(referenceBeatRecords,range);
 	anchorButton.disabled = !ref.name || !referenceCache || workState.blocksEditing || !range;
 	clearBeatButton.disabled = !ref.name || !referenceCache || workState.blocksEditing || !range || !hasReferenceBeatMarkers(range);
 	anchorButton.title = !ref.name || !referenceCache ? '請先載入參考音軌' : workState.blocksEditing ? '請等待目前前景工作完成'
 		: !range ? '請先在檢測列標示範圍' : '在播放紅線附近新增錨點；若範圍已有拍點，先清除整個範圍再重新錨定';
 	clearBeatButton.title = !ref.name || !referenceCache ? '請先載入參考音軌' : workState.blocksEditing ? '請等待目前前景工作完成'
 		: !range ? '請先在檢測列標示範圍' : hasReferenceBeatMarkers(range) ? '清除目前檢測範圍內所有節拍標記與錨點' : '目前檢測範圍沒有節拍標記';
-	syncButton.setAttribute('aria-pressed', String(referenceSyncEnabled));
-	syncButton.classList.toggle('on', referenceSyncEnabled);
 	tempoBpm.disabled = workState.isBusy;
 	tempoMeter.disabled = workState.isBusy;
 	tempoTolerance.disabled = workState.isBusy;
+	referenceInstrumentProfile.disabled=workState.isBusy;
 	onsetProminence.disabled = workState.isBusy;
 	beatConfirmation.disabled = workState.isBusy;
-	syncButton.title = !ref.name || !referenceCache ? '請先載入參考音軌' : workState.isBusy ? '請等待目前工作完成' : '切換是否在 AI 檢測時一併分析參考音軌';
+	syncButton.title = !ref.name || !referenceCache ? '請先載入參考音軌' : workState.isBusy ? '請等待目前工作完成' : !range ? '請先設定檢測範圍' : rangeAnchor===null ? '請先在目前範圍設定錨點' : hasReferenceBeatsInRange(referenceBeatRecords,range) ? '目前範圍已有節拍；請先清除後再分析' : '分析目前檢測範圍的參考音軌節拍與和弦';
 }
 
 async function loadReference(file: File) {
@@ -1975,17 +2049,20 @@ async function loadReference(file: File) {
 		refAudio = { channels: audio.channels, sampleRate: audio.sampleRate };
 		referenceCache = createReferenceCache(audio.channels, audio.sampleRate);
 		++rhythmGeneration;
-		referenceSyncEnabled = false;
 		referenceBarStarts = [];
 		referenceVirtualBarStarts = [];
 		referenceBeatRecords = [];
 		referenceBeatsCommitted = false;
 		lastReferenceAnalysisRange = null;
-		ref.name = audio.name;
+			ref.name = audio.name;
+			ref.fileSize = file.size;
+			ref.lastModified = file.lastModified;
 		ref.beatAnchorSec = null;
 		ref.beatAnchorSecs = [];
 		syncedReferenceRhythm = null;
-		if (pendingRefSettings && pendingRefSettings.name === audio.name) {
+			if (pendingRefSettings && pendingRefSettings.name === audio.name
+				&& (pendingRefSettings.fileSize === undefined || pendingRefSettings.fileSize === file.size)
+				&& (pendingRefSettings.lastModified === undefined || pendingRefSettings.lastModified === file.lastModified)) {
 			ref.gainDb = pendingRefSettings.gainDb;
 			ref.muted = pendingRefSettings.muted;
 			ref.offsetSec = pendingRefSettings.offsetSec;
@@ -1998,6 +2075,7 @@ async function loadReference(file: File) {
 			if (pendingRefSettings.tempoBpm) tempoBpm.value = String(pendingRefSettings.tempoBpm);
 			if (pendingRefSettings.tempoMeter) tempoMeter.value = pendingRefSettings.tempoMeter;
 			if (pendingRefSettings.tempoTolerancePercent) tempoTolerance.value = String(pendingRefSettings.tempoTolerancePercent);
+			if (pendingRefSettings.instrumentProfile==='rhythm'||pendingRefSettings.instrumentProfile==='melody') referenceInstrumentProfile.value=pendingRefSettings.instrumentProfile;
 			if (pendingRefSettings.onsetProminenceThreshold) onsetProminence.value = String(pendingRefSettings.onsetProminenceThreshold);
 			if (pendingRefSettings.beatConfirmationThreshold) beatConfirmation.value = String(pendingRefSettings.beatConfirmationThreshold);
 			if (ref.beatAnchorSec !== null && referenceBarStarts.length) syncedReferenceRhythm = {
@@ -2022,21 +2100,28 @@ async function loadReference(file: File) {
 	} finally { progress.finish('參考音軌讀取工作已結束'); }
 }
 
-function removeReference() {
+function removeReference(showHint = true) {
 	++rhythmGeneration;
-	referenceSyncEnabled = false;
 	player.setBackground(null);
 	refWave.setAudio(null);
 	refAudio = null;
 	referenceCache = null; referenceBarStarts = []; referenceVirtualBarStarts = [];
+	referenceBeatRecords = [];
+	referenceBeatsCommitted = false;
 	lastReferenceAnalysisRange = null;
 	ref.name = null;
+	ref.fileSize = null;
+	ref.lastModified = null;
+	ref.gainDb = 0;
+	ref.muted = false;
+	ref.offsetSec = 0;
 	ref.beatAnchorSec = null;
 	ref.beatAnchorSecs = [];
 	syncedReferenceRhythm = null;
+	pendingRefSettings = null;
 	rebuildReferenceBars();
 	syncRefUi();
-	hint('已移除參考音軌');
+	if(showHint)hint('已移除參考音軌');
 }
 
 function toggleRefMute() {
@@ -2114,8 +2199,14 @@ const aiOverlay = new AIRegionOverlay(document.getElementById('pianoroll-wrap')!
 // 黃框位於 canvas 上方，是 canvas 的兄弟節點；事件不會冒泡到 canvas，必須綁定同一套縮放手勢。
 bindZoomGesture(aiOverlay.gestureTarget, zoomTimelineAtPointer, () => source !== null);
 async function completeAIReview() {
- if(!curves || !aiReview || !trainingAsset || workState.isBusy)return;
- const task=workState.tryBegin('render','整理 AI 修正回饋');if(!task)return;
+	 if(!curves || !trainingAsset || workState.isBusy)return false;
+ if(!aiReview){
+  const count=aiRegions.length;aiRegions=[];aiOverlay.clear();syncAIControls();
+  trainingStatus.textContent=`已清除檢測檔案載入的 ${count} 個黃框；這些黃框沒有本次工作階段音訊，因此不建立訓練資料`;
+	  return true;
+ }
+	 const task=workState.tryBegin('render','整理 AI 修正回饋');if(!task)return false;
+	 let completed=false;
  try {
   for(const region of aiRegions)syncAIRegion(region,curves);
   // 不從曲線差異推測使用者意圖；只保存黃框互動明確留下的分類。
@@ -2124,20 +2215,23 @@ async function completeAIReview() {
    const range={start:toOut(Curves.frameToTime(region.from)),end:toOut(Curves.frameToTime(region.to))};
    if(range.end-range.start>5){skipped++;continue;}
    const audio=aiReview.audio.get(region.id);if(!audio){skipped++;continue;}
+   const reviewSource=aiReview.sources.get(region.id)??aiReview.runs.find(run=>rangesOverlap(run.input.range,range))??aiReview.runs.at(-1);
+   if(!reviewSource){skipped++;continue;}
+   const {input,keyLabel,proposal}=reviewSource;
    task.update(`保存 AI 修正回饋 ${rejectedSaved+adjustedStaged+1}/${feedback.length}`);
    const sr=renderer.sampleRate;
    const feedbackType=region.feedbackType!;
-   const pair=await prepareTrainingPair({before:aiReview.curves,after:curves,beforeAudio:audio.channels,
+   const pair=await prepareTrainingPair({before:proposal,after:curves,beforeAudio:audio.channels,
     afterAudio:renderer.rendered.map(c=>c.slice(Math.round(audio.start*sr),Math.round(audio.end*sr))),
     midi:pitchMidi!,voiced:curveVoiced!,start:audio.start,end:audio.end,sampleRate:sr,
-    key:KEY_OPTIONS.find(k=>k.id===(region.feedbackKey?.value ?? aiReview!.input.key.id))??null,
+    key:KEY_OPTIONS.find(k=>k.id===(region.feedbackKey?.value ?? input.key.id))??null,
     metadata:{asset:trainingAsset,operation:feedbackType==='adjusted'?'AI 修正後人工調整':'取消 AI 修正',editRange:range,
-     keySelection:region.feedbackKey ?? {value:aiReview.input.key.id,label:aiReview.keyLabel},
-     aiKey:aiReview.input.key,aiKeyLabel:aiReview.keyLabel,feedbackType,
-     correctionKind:region.kind,aiLevel:aiReview.input.level,manualOffset:region.offset,
+     keySelection:region.feedbackKey ?? {value:input.key.id,label:keyLabel},
+     aiKey:input.key,aiKeyLabel:keyLabel,feedbackType,
+     correctionKind:region.kind,aiLevel:input.level,manualOffset:region.offset,
      audioComparison:region.kind==='manual'?'before=manual selection baseline; after=user adjusted result':'before=AI proposal; after=user accepted result',
-     originalPitch:Array.from(aiReview.input.curves.pitch.slice(region.from,region.to)),
-     detectionRange:aiReview.input.range,selection:range}});
+     originalPitch:Array.from(input.curves.pitch.slice(region.from,region.to)),
+     detectionRange:input.range,selection:range}});
    pair.metadata.recordId=region.recordId;
    if(feedbackType==='adjusted'){await stageTrainingPair(pair);adjustedStaged++;}
    else{await storeRejectedTrainingPair(pair);rejectedSaved++;}
@@ -2149,8 +2243,10 @@ async function completeAIReview() {
    ? `取消修正已正式保存 ${rejectedSaved} 筆；人工調整已暫存 ${adjustedStaged} 筆；未操作黃框 ${untouched} 筆不記錄${skipped?`；略過 ${skipped} 筆（超過 5 秒或無可用音訊）`:''}${adjustedStaged?'，匯出 WAV 時保存人工調整資料':''}`
    : `沒有取消勾選或人工重新調整的黃框；${untouched} 筆未操作黃框不建立訓練記錄`;
   task.finish('AI 修正標示已取消，聲音保留目前狀態');
- }catch(error){task.finish(String(error),true);trainingStatus.textContent=`回饋保存失敗，黃框保留供重試：${String(error)}`;}
+	  completed=true;
+	 }catch(error){task.finish(String(error),true);trainingStatus.textContent=`回饋保存失敗，黃框保留供重試：${String(error)}`;}
  finally{task.finish('AI 回饋工作結束');}
+	 return completed;
 }
 
 const aiSettings = new AISettingsView(document.getElementById('ai-settings-dialog') as HTMLDialogElement, () => {
@@ -2203,36 +2299,48 @@ updateAIStrengthText();
 async function discardAICorrection() {
 	if (!curves || !aiReview || workState.isBusy) return;
 	const task=workState.tryBegin('render','放棄 AI 修改');if(!task)return;
-	const target=aiReview.input.curves.clone();
-	const referenceBeatRange=aiReview.referenceBeatRange;
+	const target=aiReview.baseline.clone();
+	const restoreRanges=[...aiReview.runs.map(run=>run.input.range),...aiRegions.map(region=>({
+		start:toOut(Curves.frameToTime(region.from)),end:toOut(Curves.frameToTime(region.to)),
+	}))];
 	try {
 		player.pause();syncPlayButton();
 		task.update('還原 AI 修音前資料');
-		await renderer.patch(target,aiReview.input.range.start,aiReview.input.range.end);
-		const removedBeats=clearAIReferenceBeatRange(referenceBeatRange);
+		for(const range of restoreRanges)await renderer.patch(target,range.start,range.end);
 		curves=target;manualBaseline=target.clone();history.truncate(aiReview.historyDepth);
 		aiRegions=[];aiReview=null;aiOverlay.clear();clearSelection();selectedAnchors.clear();
 		player.setAudio(renderer.rendered,renderer.sampleRate);resetParams();syncToolbar();
-		const beatMessage=referenceBeatRange ? `；本次 AI 拍點已清除${removedBeats ? `（${removedBeats} 筆）` : ''}` : '';
-		aiToolbar.setStatus(`已放棄 AI 修改，整個音頻已回復到 AI 調音前${beatMessage}`);
-		hint(`已放棄 AI 修改，整個音頻已回復到 AI 調音前${beatMessage}`);
+		aiToolbar.setStatus('已放棄 AI 修改，整個音頻已回復到 AI 調音前；參考節拍與和弦保留不變');
+		hint('已放棄 AI 修改，整個音頻已回復到 AI 調音前；參考節拍與和弦保留不變');
 		task.finish('AI 修改已取消');
 	}catch(error){const message=`放棄 AI 修改失敗：${error instanceof Error?error.message:String(error)}`;aiToolbar.setStatus(message);task.finish(message,true);}
 	finally{task.finish('放棄 AI 修改工作結束');syncAIControls();}
 }
 function cancelAICorrection() { if (aiFlow.cancel()) aiToolbar.setCancelDisabled(true); }
 
+function rangesOverlap(a:TimeRange,b:TimeRange):boolean {
+	return a.start < b.end && a.end > b.start;
+}
+
+function aiDetectionConflict(range:TimeRange):'yellow'|null {
+	if(aiRegions.some(region=>rangesOverlap(range,{
+		start:toOut(Curves.frameToTime(region.from)),end:toOut(Curves.frameToTime(region.to)),
+	})))return 'yellow';
+	return null;
+}
+
 function syncAIControls() {
 	syncReferenceButton();
 	const locked = workState.isBusy;
 	const range = detectionBar.range;
-	const correctDisabled = !!aiRegions.length || locked || !aiReady || !aiSettings.ready || !curves || !pitchMidi || !curveVoiced || !editorOptions.keyValue || !range || range.end <= range.start;
+	const conflict=range&&range.end>range.start?aiDetectionConflict(range):null;
+	const correctDisabled = locked || !aiReady || !aiSettings.ready || !curves || !pitchMidi || !curveVoiced || !editorOptions.keyValue || !range || range.end <= range.start || !!conflict;
 	aiToolbar.setControls({
 		disabled: locked,
 		correct: correctDisabled,
-		correctTitle: aiRegions.length ? '請先取消目前 AI 修正標示，再執行下一次 AI 修正' : !editorOptions.keyValue ? '請先選擇 Key（不能是全部音）' : !range || range.end <= range.start ? '請先在檢測列標示範圍' : '只修正檢測範圍；修正後可逐框審核或取消整次 AI 修改',
+		correctTitle: locked ? '請等待目前工作完成' : !aiReady ? '主音檔音高分析尚未完成' : !aiSettings.ready ? '請先完成 AI 設定' : !editorOptions.keyValue ? '請先選擇 Key（不能是全部音）' : !range || range.end <= range.start ? '請先在檢測列標示範圍' : conflict==='yellow' ? '此檢測範圍已有黃框；請改選尚未檢測的範圍' : '只分析主要音頻並產生黃框；不會執行參考音軌分析',
 		discard: locked || !aiReady || !aiReview || !aiRegions.length,
-		discardTitle: aiRegions.length ? '放棄本次 AI 修音及黃框內人工調整，回復 AI 執行前的完整音頻，並清除本次 AI 檢測產生的拍點' : '目前沒有可取消的 AI 修改',
+		discardTitle: aiRegions.length ? '放棄本次 AI 修音及黃框內人工調整；參考節拍與和弦不受影響' : '目前沒有可取消的 AI 修改',
 		complete: locked || !aiRegions.length,
 	});
 	toolLaneControls.setDisabled(!!aiRegions.length || locked);
@@ -2240,11 +2348,15 @@ function syncAIControls() {
 }
 
 async function startAICorrection() {
-	if (!source || !curves || !pitchMidi || !curveVoiced || drag || aiFlow.running) return;
+	if (!source || !curves || !pitchMidi || !curveVoiced || drag || aiFlow.running) return 'invalid' as const;
 	const key = KEY_OPTIONS.find(k => k.id === editorOptions.keyValue);
 	const range = detectionBar.range;
-	if (!key || !range || range.end <= range.start) return;
-	if (referenceSyncEnabled && !await analyzeSynchronizedTracks()) return;
+	if (!key || !range || range.end <= range.start) return 'invalid' as const;
+	const conflict=aiDetectionConflict(range);
+	if(conflict){
+		const message='檢測範圍已有黃框；請改選沒有黃框的範圍';
+		aiToolbar.setStatus(message);hint(message);syncAIControls();return 'invalid' as const;
+	}
 	const sourceStart = curves.timeMap.outToSrc(range.start);
 	const sourceEnd = curves.timeMap.outToSrc(range.end);
 	const segments = planBalancedAudioSegments(source.channels, source.sampleRate, {
@@ -2252,32 +2364,32 @@ async function startAICorrection() {
 	})
 		.map(segment => ({ start: curves!.timeMap.srcToOut(segment.start), end: curves!.timeMap.srcToOut(segment.end) }));
 	const historyDepthBeforeAI=history.depth;
+	const referenceRhythm=referenceRhythmForRange(referenceBeatRecords,range,Number(tempoBpm.value),tempoMeter.value,syncedReferenceRhythm);
 	const outcome = await aiFlow.run({
 		curves, midi: pitchMidi, voiced: curveVoiced, key, range, segments,
 		level: aiToolbar.level, settings: aiSettings.settings, formantFollow: renderer.formantFollow,
-		referenceRhythm: referenceSyncEnabled && syncedReferenceRhythm ? { ...syncedReferenceRhythm,
-			barStartsSec: syncedReferenceRhythm.barStartsSec.filter(t => t >= range.start && t <= range.end),
-			virtualBarStartsSec: syncedReferenceRhythm.virtualBarStartsSec?.filter(t => t >= range.start && t < range.end),
-			pitch: syncedReferenceRhythm.pitch?.filter(p => p.timeSec >= range.start && p.timeSec <= range.end),
-		} : undefined,
+		referenceRhythm,
 	}, update => {
 		aiToolbar.setStatus(update.message);
 		aiToolbar.setCancelDisabled(!update.cancellable);
 	});
 	switch (outcome.status) {
 		case 'completed': {
-			const referenceBeatRange = referenceSyncEnabled && syncedReferenceRhythm && lastReferenceAnalysisRange
-				? { ...lastReferenceAnalysisRange } : null;
-			commitReferenceBeatRecords();
-			referenceBeatsCommitted = referenceSyncEnabled && syncedReferenceRhythm !== null && referenceBarStarts.length > 0;
 			const { settings, key, level, range } = outcome.input;
 			// AICorrectionFlow has committed the corrected curves by this point. Keep the
 			// pre/post curve pair and the rendered AI audio so every returned region can
 			// be reviewed independently and later exported as training feedback.
-			aiRegions = createAIRegions(outcome.input.curves, curves!, outcome.regions);
-			const reviewAudio = new Map<number, { start: number; end: number; channels: import('./types').Samples[] }>();
+			const nextId=aiRegions.reduce((id,region)=>Math.max(id,region.id+1),0);
+			const newRegions=createAIRegions(outcome.input.curves,curves!,outcome.regions)
+				.map((region,index)=>({...region,id:nextId+index}));
+			const proposal=curves!.clone();
+			const reviewSource:AIReviewSource={input:outcome.input,proposal,keyLabel:key.label};
+			if(!aiReview)aiReview={baseline:outcome.input.curves.clone(),audio:new Map(),historyDepth:historyDepthBeforeAI,
+				sources:new Map(),runs:[]};
+			aiReview.runs.push(reviewSource);
 			const duration = renderer.rendered[0]?.length / renderer.sampleRate || 0;
-			for (const region of aiRegions) {
+			for (const region of newRegions) {
+				aiReview.sources.set(region.id,reviewSource);
 				const regionStart = toOut(Curves.frameToTime(region.from));
 				const regionEnd = toOut(Curves.frameToTime(region.to));
 				if (regionEnd - regionStart > 5) continue;
@@ -2285,21 +2397,20 @@ async function startAICorrection() {
 				const end = Math.min(duration, regionEnd + 3);
 				const fromSample = Math.round(start * renderer.sampleRate);
 				const toSample = Math.round(end * renderer.sampleRate);
-				reviewAudio.set(region.id, {
+				aiReview.audio.set(region.id, {
 					start, end,
 					channels: renderer.rendered.map(channel => channel.slice(fromSample, toSample)),
 				});
 			}
-			aiReview = { curves: curves!.clone(), input: outcome.input, audio: reviewAudio, keyLabel: key.label, historyDepth: historyDepthBeforeAI, referenceBeatRange };
+			aiRegions.push(...newRegions);
 			clearSelection();setActiveLane('pitch');setTool('select');
-			aiToolbar.setStatus(`${settings.provider === 'rules' ? '傳統內建修正' : settings.provider === 'builtin-ai' ? '內建 AI 修正' : '外部 AI 修正'}完成：${outcome.count} 個音符 · ${aiRegions.length} 個黃框 · ${outcome.segmentCount} 個低音壓分段 · ${key.label} · ${level}/10 · ${fmtTime(range.start)}～${fmtTime(range.end)}`);
+			aiToolbar.setStatus(`${settings.provider === 'rules' ? '傳統內建修正' : settings.provider === 'builtin-ai' ? '內建 AI 修正' : '外部 AI 修正'}完成：新增 ${newRegions.length} 個黃框（目前共 ${aiRegions.length} 個） · ${outcome.segmentCount} 個低音壓分段 · ${key.label} · ${level}/10 · ${fmtTime(range.start)}～${fmtTime(range.end)}`);
 			break;
 		}
-		case 'unchanged':
-			commitReferenceBeatRecords();
-			referenceBeatsCommitted = referenceSyncEnabled && syncedReferenceRhythm !== null && referenceBarStarts.length > 0;
+		case 'unchanged': {
 			aiToolbar.setStatus('沒有需要修正的穩定音符；不確定的音符保留原樣');
 			break;
+		}
 		case 'cancelled':
 		case 'failed':
 			aiToolbar.setStatus(outcome.message);
@@ -2307,13 +2418,17 @@ async function startAICorrection() {
 		case 'busy': break;
 	}
 	syncAIControls();
+	return outcome.status;
 	}
 
 function commitReferenceBeatRecords() {
-	if (!referenceSyncEnabled || !syncedReferenceRhythm || !lastReferenceAnalysisRange) return;
+	if (!syncedReferenceRhythm || !lastReferenceAnalysisRange) return;
 	referenceBeatRecords = mergeReferenceBeats(referenceBeatRecords, syncedReferenceRhythm.barStartsSec,
-		syncedReferenceRhythm.bpm, syncedReferenceRhythm.meter, lastReferenceAnalysisRange, syncedReferenceRhythm.virtualBarStartsSec);
-	document.getElementById('ref-beat-status')!.textContent = `已記錄 ${referenceBeatRecords.length} 拍 · 本次 ${referenceBarStarts.length} 個小節起點`;
+		syncedReferenceRhythm.bpm, syncedReferenceRhythm.meter, lastReferenceAnalysisRange,
+		syncedReferenceRhythm.virtualBarStartsSec, syncedReferenceRhythm.beatHarmony,
+		syncedReferenceRhythm.beatTimesSec, syncedReferenceRhythm.virtualBeatTimesSec);
+	const chordCount = referenceBeatRecords.filter(row => referenceBeatInRange(row.timeSec, lastReferenceAnalysisRange!) && row.chord).length;
+	document.getElementById('ref-beat-status')!.textContent = `已記錄 ${referenceBeatRecords.length} 拍 · 本次 ${referenceBarStarts.length} 個小節起點 · ${chordCount} 拍和弦`;
 }
 
 workState.subscribe(state => {
@@ -2330,6 +2445,7 @@ workState.subscribe(state => {
 		canOpenAudio: workState.canStart('load'),
 		canOpenProject: workState.canStart('project'),
 		canExport: !!source && !!curves && workState.canStart('export'),
+		canOverwrite: !!source && !!curves && !!sourceWritebackPath && workState.canStart('export'),
 		canSave: !!source && !!curves && !state.blocksEditing,
 	});
 	referenceControls.setDisabled(!workState.canStart('reference'));

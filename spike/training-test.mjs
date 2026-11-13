@@ -32,12 +32,26 @@ async function call(method, url, body, headers = {}) {
  await handler(req, { statusCode: 200, setHeader() {}, end(text) { response = { status: this.statusCode, data: JSON.parse(text) }; } });
  return response;
 }
+async function callRaw(method,url,body,headers={}){
+ const req=Readable.from(body?[body]:[]);Object.assign(req,{method,url,headers:{host:'127.0.0.1:5180',...headers}});
+ let response;await handler(req,{statusCode:200,setHeader(){},end(text){response={status:this.statusCode,data:JSON.parse(text)};}});return response;
+}
 try {
  assert.equal((await call('GET', '/config', null, { origin: 'https://evil.test' })).status, 403);
  assert.equal((await call('POST', '/stage', {})).status, 403);
  const token = (await call('GET', '/config')).data.token;
  const samples = Float32Array.from({ length: 48000 * 8 }, (_, i) => .2 * Math.sin(i * 2 * Math.PI * 440 / 48000));
- const wav = Buffer.from(await encodeWav24([samples], 48000).arrayBuffer()).toString('base64');
+ const wavBuffer = Buffer.from(await encodeWav24([samples], 48000).arrayBuffer());
+ const wav = wavBuffer.toString('base64');
+ const originalPath=path.join(root,'原始音訊.wav');await writeFile(originalPath,wavBuffer);
+	const projectText=JSON.stringify({format:'wipitch-project',version:6});
+	const projectWrite=await call('POST','/write-project',{path:originalPath,text:projectText},{'x-training-token':token});
+	assert.equal(projectWrite.status,200,JSON.stringify(projectWrite));
+	const projectFind=await call('POST','/find-project',{path:originalPath},{'x-training-token':token});
+	assert.equal(projectFind.status,200);assert.equal(projectFind.data.name,'原始音訊.wipitch.json');assert.equal(projectFind.data.text,projectText);
+ const writeResult=await callRaw('POST','/write-audio',wavBuffer,{'x-training-token':token,'x-audio-path':encodeURIComponent(originalPath)});
+ assert.equal(writeResult.status,200,JSON.stringify(writeResult));
+ assert.ok((await readFile(originalPath)).length>100);assert.ok((await readFile(writeResult.data.backupPath)).length>100);
  const asset = { id: randomUUID(), name: '測試.wav' };
  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=';
  const payload = { metadata: { kind: 'manual-pitch', recordId: randomUUID(), clip: { start: 0, end: 8, duration: 8 }, editRange: { start: 3, end: 8 }, image: layout, asset }, beforeWav: wav, afterWav: wav, overlayPng: png };

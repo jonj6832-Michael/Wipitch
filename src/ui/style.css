@@ -58,6 +58,27 @@ body { display: flex; flex-direction: column; }
 .ai-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 10px; }
 #ai-settings-status { min-height: 20px; color: var(--accent); }
 
+#guide-dialog { color: var(--text); background: var(--panel); border: 1px solid var(--accent-dim); border-radius: 12px; width: min(720px, 94vw); max-height: 90vh; padding: 0; box-shadow: 0 18px 70px #000b; }
+#guide-dialog::backdrop { background: #000b; }
+.guide-shell { padding: 24px; }
+.guide-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.guide-progress { color: var(--accent); font-size: 11px; letter-spacing: .04em; }
+#guide-title { margin: 4px 0 0; font-size: 22px; }
+.guide-close { padding: 2px 9px; font-size: 22px; line-height: 1; }
+.guide-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; padding: 0; margin: 22px 0 20px; list-style: none; counter-reset: guide-step; }
+.guide-steps li { min-height: 42px; padding: 7px 8px 7px 26px; position: relative; color: var(--dim); background: #14171c; border: 1px solid var(--line); border-radius: 6px; font-size: 11px; line-height: 1.25; }
+.guide-steps li::before { counter-increment: guide-step; content: counter(guide-step); position: absolute; left: 8px; top: 8px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.guide-steps li.current { color: var(--text); border-color: var(--accent); background: #1c3440; }
+.guide-steps li.current::before { color: var(--accent); }
+.guide-steps li.done { color: #9bd8a7; border-color: #356346; }
+.guide-steps li.done::before { content: '✓'; color: #78d28b; }
+.guide-description { min-height: 54px; margin: 0; font-size: 15px; line-height: 1.7; }
+.guide-tip { margin-top: 12px; padding: 10px 12px; color: var(--dim); background: #14171c; border-radius: 6px; font-size: 12px; }
+.guide-actions { display: flex; align-items: center; gap: 8px; margin-top: 22px; }
+.guide-primary { border-color: var(--accent-dim); background: #214454; }
+.guide-primary:hover:not(:disabled) { background: #2b6177; }
+.guide-secondary { color: var(--dim); }
+
 header {
 	display: flex;
 	align-items: center;
@@ -132,11 +153,12 @@ main { flex: 1; display: grid; grid-template-rows: 1fr 18px 6px var(--wave-h, 15
 
 /* 參考音軌的工具列，放在參考音軌左上 */
 #bg-bar {
-	position: absolute; left: calc(var(--piano-key-width) + 6px); top: 4px;
-	display: flex; align-items: center; gap: 4px;
+	position: absolute; left: calc(var(--piano-key-width) + 6px); right: 4px; top: 4px;
+	display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
 	font-size: 11px; color: var(--dim);
 	background: rgba(23, 27, 33, 0.8); padding: 2px 6px; border-radius: 4px;
 }
+#bg-bar .tempo-field { font-size: 10px; }
 #bg-bar button, #bg-bar .file { font-size: 11px; padding: 1px 6px; }
 #bg-controls { display: flex; align-items: center; gap: 4px; }
 #bg-controls[hidden] { display: none; }
@@ -485,6 +507,7 @@ body[data-workspace="readable"] .detection-legend { font-size: 12px; }
 /* 觸控編輯時由 Pointer Events 接管手勢，避免瀏覽器捲動中斷拖曳。 */
 .track canvas, #pianoroll-wrap canvas { touch-action: none; }
 @media (max-width: 900px) {
+	.guide-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); }
  html, body { height: 100dvh; }
  header { flex-wrap: wrap; gap: 6px; padding: 6px; max-height: 28dvh; overflow: auto; }
  #build-version { flex-basis: auto; min-width: 0; font-size: 12px; }

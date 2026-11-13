@@ -8,6 +8,7 @@ export interface HeaderPanelEvents {
 	selectAudio(file: File): void;
 	openAudio(): void;
 	exportWav(): void;
+	overwriteOriginal(): void;
 	saveProject(): void;
 	openProject(file: File): void;
 	setFormantFollow(follow: 0 | 1): void;
@@ -17,6 +18,7 @@ export class HeaderPanelView {
 	private file: HTMLInputElement;
 	private openAudio: HTMLButtonElement;
 	private exportButton: HTMLButtonElement;
+	private overwriteButton: HTMLButtonElement;
 	private saveButton: HTMLButtonElement;
 	private project: HTMLInputElement;
 	private voice: HTMLButtonElement;
@@ -30,6 +32,7 @@ export class HeaderPanelView {
 		this.file = root.querySelector<HTMLInputElement>('#file')!;
 		this.openAudio = root.querySelector<HTMLButtonElement>('#open-audio')!;
 		this.exportButton = root.querySelector<HTMLButtonElement>('#export')!;
+		this.overwriteButton = root.querySelector<HTMLButtonElement>('#overwrite-original')!;
 		this.saveButton = root.querySelector<HTMLButtonElement>('#save')!;
 		this.project = root.querySelector<HTMLInputElement>('#open-project')!;
 		this.voice = root.querySelector<HTMLButtonElement>('#mode-voice')!;
@@ -45,6 +48,7 @@ export class HeaderPanelView {
 		});
 		this.openAudio.addEventListener('click', events.openAudio);
 		this.exportButton.addEventListener('click', events.exportWav);
+		this.overwriteButton.addEventListener('click', events.overwriteOriginal);
 		this.saveButton.addEventListener('click', events.saveProject);
 		this.project.addEventListener('change', () => {
 			const selected = this.project.files?.[0];
@@ -66,11 +70,12 @@ export class HeaderPanelView {
 		this.background.hidden = label === null;
 		this.backgroundText.textContent = label ?? '背景精算（等待中）';
 	}
-	setActions(state: { canOpenAudio: boolean; canOpenProject: boolean; canExport: boolean; canSave: boolean }) {
+	setActions(state: { canOpenAudio: boolean; canOpenProject: boolean; canExport: boolean; canOverwrite?: boolean; canSave: boolean }) {
 		this.openAudio.disabled = !state.canOpenAudio;
 		this.file.disabled = !state.canOpenAudio;
 		this.project.disabled = !state.canOpenProject;
 		this.exportButton.disabled = !state.canExport;
+		this.overwriteButton.disabled = !state.canOverwrite;
 		this.saveButton.disabled = !state.canSave;
 	}
 	setInert(inert: boolean) { this.root.inert = inert; }

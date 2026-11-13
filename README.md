@@ -24,7 +24,7 @@
 
 ### 離線安裝包（推薦）
 
-只需要 [Node.js](https://nodejs.org/) 18 以上，Linux 與 macOS 都可以。不需要網路。
+需要 [Node.js](https://nodejs.org/) 18 以上與 Python 3；首次安裝會下載並安裝 Librosa/NumPy。
 
 ```
 tar xzf wipitch-<版本>.tar.gz
@@ -49,6 +49,16 @@ npm run dev
 ```
 
 然後用瀏覽器打開 `http://localhost:5180/`。
+
+#### Librosa 和弦分析（可選）
+
+參考音軌的節拍與和弦分析會呼叫本機 Librosa（beat tracking、onset strength 與 CQT 色度分析）。正式安裝包會自動建立虛擬環境並安裝這些依賴；從原始碼執行時請先執行：
+
+```
+python3 -m pip install -r requirements-librosa.txt
+```
+
+這個橋接功能只在 `npm run dev` 的開發伺服器提供；部署純靜態 `dist/` 時不包含 Librosa 後端。
 
 > 開發伺服器預設綁在 `0.0.0.0`，同一個區網的其他電腦也連得到。
 > 只想自己用的話，把 `package.json` 裡 `dev` 指令的 `--host 0.0.0.0` 拿掉。

@@ -33,7 +33,22 @@ export interface ParallelPitchOptions {
 
 export async function detectPitchParallel(audio: Float32Array, options: ParallelPitchOptions = {}): Promise<PitchTrack> {
 	let fallbackReason: string | undefined;
-	return withWasmFallback(options.mode ?? 'wasm', backend => runPool(audio, backend, options, fallbackReason), reason => {
+	const run = async (backend: ComputeBackend) => {
+		try { return await runPool(audio, backend, options, fallbackReason); }
+		catch (error) {
+			// AI 同步分析會同時建立主軌與參考軌兩組 pool。部分瀏覽器在多個
+			// ONNX/WASM session 同時初始化時會終止 Worker；CPU 模式以單一
+			// Worker 重試，確保資源有限的機器仍能完成分析。
+			const automatic = availableParallelWorkers(backend === 'webgpu' ? 'gpu' : 'cpu');
+			const effectiveLimit = Math.max(1, Math.min(automatic, options.workerLimit ?? automatic));
+			if (backend !== 'wasm' || effectiveLimit <= 1) throw error;
+			const reason = error instanceof Error ? error.message : String(error);
+			options.onStage?.(`多 Worker 啟動失敗，改用單一 CPU Worker 重試：${reason}`);
+			options.onProgress?.(0);
+			return runPool(audio, backend, { ...options, workerLimit: 1, segmentCount: 1 }, fallbackReason);
+		}
+	};
+	return withWasmFallback(options.mode ?? 'wasm', run, reason => {
 		fallbackReason = reason;
 		options.onStage?.('GPU 無法使用，改用多 Worker CPU 重新分析');
 		options.onProgress?.(0);
@@ -56,8 +71,9 @@ async function runPool(audio: Float32Array, backend: ComputeBackend, options: Pa
 	if (!segments.length) throw new Error('缺少音高分析音訊');
 	const workerCount = Math.min(limit, segments.length);
 	options.onStage?.(`建立 ${workerCount} 個音高分析 Worker`);
-	const links = Array.from({ length: workerCount }, () => new PitchWorkerLink(backend));
+	const links: PitchWorkerLink[] = [];
 	try {
+		for (let i = 0; i < workerCount; i++) links.push(new PitchWorkerLink(backend));
 		await Promise.all(links.map(link => link.ready));
 		options.onBackend?.({ backend, fallback: fallbackReason !== undefined, reason: fallbackReason });
 		options.onPlan?.({ segments: segments.length, workers: workerCount,
@@ -101,7 +117,11 @@ class PitchWorkerLink {
 		const fail = (error: Error) => {
 			this.readyReject(error); this.active?.reject(error); this.active = null; this.worker.terminate();
 		};
-		this.worker.onerror = event => { event.preventDefault(); fail(new Error(event.message || '音高 Worker 無法啟動')); };
+		this.worker.onerror = event => {
+			event.preventDefault();
+			const location = event.filename ? `（${event.filename}:${event.lineno}）` : '';
+			fail(new Error(`音高 Worker（${backend}）啟動或執行失敗：${event.message || 'Worker 模組載入失敗；請重新整理頁面後重試'}${location}`));
+		};
 		this.worker.onmessageerror = () => fail(new Error('音高 Worker 資料傳輸失敗'));
 		this.worker.onmessage = event => {
 			const data = event.data;

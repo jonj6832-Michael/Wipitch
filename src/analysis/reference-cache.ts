@@ -9,6 +9,9 @@ export interface ReferenceRhythm {
 	anchorSec: number;
 	barStartsSec: number[];
 	virtualBarStartsSec?: number[];
+	beatTimesSec?: number[];
+	virtualBeatTimesSec?: number[];
+	beatHarmony?: { timeSec: number; pitchClasses: number[]; pitchNames: string[]; chord?: string; chordConfidence?: 'high' | 'low' }[];
 	pitch?: { timeSec: number; midi: number }[];
 }
 
@@ -199,7 +202,7 @@ export function trackBarSequence(cache: ReferenceCache, anchor: number, bpm: num
 	const beats = Number(meter.split('/')[0]); // BPM 以拍號分母所指音符為一拍。
 	const initialInterval = 60 / bpm * beats;
 	if (!Number.isFinite(anchor) || !Number.isFinite(initialInterval) || initialInterval <= 0 || end <= start) return [];
-	const tolerance = Math.max(0.01, Math.min(0.25, bpmTolerance));
+	const tolerance = Math.max(0.01, Math.min(0.10, bpmTolerance));
 	const points: TrackedBar[] = [];
 	if (anchor >= start && anchor < end) points.push({ timeSec: anchor, confirmed: true });
 	let current = anchor, interval = initialInterval;
@@ -212,7 +215,8 @@ export function trackBarSequence(cache: ReferenceCache, anchor: number, bpm: num
 		const candidates = findOnsetCandidates(cache, earliest, current + interval / (1 - tolerance), expected,
 			start, end, 6, onsetProminence);
 		const ranked = candidates.map(candidate => ({ candidate,
-			score: 0.75 * candidate.score + 0.25 * futureRhythmSupport(cache, candidate.timeSec,
+			// 當前小節的第一拍證據是主體；後續節奏只作加分，不能因後面暫時無拍而否決本拍。
+			score: candidate.score + 0.15 * futureRhythmSupport(cache, candidate.timeSec,
 				candidate.timeSec - current, tolerance, start, end, onsetProminence, confirmationThreshold),
 		})).sort((a, b) => b.score - a.score);
 		const best = ranked[0], ambiguous = !!best && !!ranked[1] && best.score - ranked[1].score < 0.08;

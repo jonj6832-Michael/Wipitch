@@ -4,7 +4,7 @@ if (Number(process.versions.node.split('.')[0]) !== 22) {
  process.exit(1);
 }
 const tests = [
- 'work-state', 'ai-correction-flow', 'ai-context', 'ai-correction', 'builtin-ai', 'compute-mode',
+ 'work-state', 'ai-correction-flow', 'reference-harmony-flow', 'ai-context', 'ai-correction', 'builtin-ai', 'compute-mode',
  'load-lifecycle', 'note-preview', 'zoom-gesture', 'detection-bar',
 	'pitch-deviation', 'timemap', 'slope-limit', 'reference-beat-table', 'diagnostics', 'training', 'project', 'local-audio', 'audio-segments', 'pitch-segments',
 ];

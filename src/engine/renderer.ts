@@ -163,6 +163,16 @@ export class Renderer {
 		await this.link.ready;
 	}
 
+	/** 放棄尚未提交的候選工作階段或關閉舊工作階段，避免 Worker 殘留。 */
+	dispose() {
+		this.cancelBackground();
+		this.link?.terminate();
+		this.link = null;
+		this.rendered = [];
+		this.original = [];
+		this.renderChannels = [];
+	}
+
 	private get srcDuration() { return this.original[0].length / this.sampleRate; }
 
 	private outLength(map: TimeMap): number {

@@ -47,7 +47,9 @@ export function streamLocalAudio(res, audio) {
 	res.setHeader('Content-Length', String(audio.size));
 	res.setHeader('X-Audio-Name', encodeURIComponent(audio.name));
 	res.setHeader('X-Audio-Last-Modified', String(audio.lastModified));
-	createReadStream(audio.path).pipe(res);
+	const stream=createReadStream(audio.path);
+	stream.on('error',error=>{if(!res.headersSent){res.statusCode=500;res.end(JSON.stringify({error:error.message}));}else res.destroy(error);});
+	stream.pipe(res);
 }
 
 function pickWindowsAudioPath() {

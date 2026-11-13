@@ -20,6 +20,8 @@ rm -rf "$OUT" "$OUT.tar.gz"
 mkdir -p "$OUT"
 cp -R dist "$OUT/app"
 cp tools/release/serve.mjs tools/release/install.sh tools/release/start.sh tools/release/README.txt "$OUT/"
+cp tools/local-audio.mjs "$OUT/"
+cp tools/librosa-chords.py tools/librosa-rhythm.py requirements-librosa.txt "$OUT/"
 chmod +x "$OUT/install.sh" "$OUT/start.sh"
 tar -C release -czf "$OUT.tar.gz" "$NAME"
 

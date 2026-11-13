@@ -26,7 +26,7 @@ try {
 		]);
 		const host = document.createElement('div');
 		host.innerHTML = `
-			<header><time id="build-version"></time><label id="workspace-selector"><select id="workspace-layout"><option value="workstation">完整工作站</option><option value="focus">專注編輯</option><option value="readable">高可讀性</option></select></label><button id="open-audio"></button><input id="file" type="file"><button id="export"></button><button id="save"></button><input id="open-project" type="file"><button id="mode-voice"></button><button id="mode-instrument"></button><span id="status"></span><span id="hint"></span><span id="bg-status"><span id="bg-text"></span></span></header>
+			<header><time id="build-version"></time><label id="workspace-selector"><select id="workspace-layout"><option value="workstation">完整工作站</option><option value="focus">專注編輯</option><option value="readable">高可讀性</option></select></label><button id="open-audio"></button><input id="file" type="file"><button id="export"></button><button id="overwrite-original"></button><button id="save"></button><input id="open-project" type="file"><button id="mode-voice"></button><button id="mode-instrument"></button><span id="status"></span><span id="hint"></span><span id="bg-status"><span id="bg-text"></span></span></header>
 			<div id="ai-toolbar"><button id="ai-settings-open"></button><input id="ai-strength" value="5"><output id="ai-strength-value"></output><button id="ai-correct"></button><button id="ai-undo"></button><button id="ai-clear-marks"></button><button id="ai-cancel"></button><span id="ai-service"></span><span id="ai-status"></span></div>
 			<div id="pitch-toolbar"><select id="key-filter"><option value="">全部音</option></select><div id="pen-opts"><input id="vib-depth" value=".5"><input id="vib-rate" value="5.5"><input id="vib-onset" value="200"><input id="vib-on" type="checkbox"><input id="vib-onset-on" type="checkbox" checked><span id="vib-unit"></span></div></div>
 			<footer id="global"><input id="ramp"><input id="slope"><button data-reset="pitch"></button><button data-reset="all"></button><button id="clear-sel"></button></footer>
@@ -48,9 +48,9 @@ try {
 		host.querySelector('#workspace-layout').value = 'focus'; host.querySelector('#workspace-layout').dispatchEvent(new Event('change'));
 		workspace.setWorkspace('readable');
 		const panelEvents = [];
-		const header = new HeaderPanelView(host.querySelector('header'), { selectAudio: () => panelEvents.push('file'), openAudio: () => panelEvents.push('open'), exportWav: () => panelEvents.push('export'), saveProject: () => panelEvents.push('save'), openProject: () => panelEvents.push('project'), setFormantFollow: value => panelEvents.push(`mode:${value}`) });
+		const header = new HeaderPanelView(host.querySelector('header'), { selectAudio: () => panelEvents.push('file'), openAudio: () => panelEvents.push('open'), exportWav: () => panelEvents.push('export'), overwriteOriginal:()=>panelEvents.push('overwrite'), saveProject: () => panelEvents.push('save'), openProject: () => panelEvents.push('project'), setFormantFollow: value => panelEvents.push(`mode:${value}`) });
 		header.setBuildVersion('建置 fixture'); header.setStatus('ready'); header.setHint('hint'); header.setBackgroundProgress('背景精算 50%'); header.setFormantFollow(1);
-		host.querySelector('#open-audio').click(); host.querySelector('#export').click(); host.querySelector('#save').click(); host.querySelector('#mode-instrument').click();
+		host.querySelector('#open-audio').click(); host.querySelector('#export').click(); host.querySelector('#overwrite-original').click(); host.querySelector('#save').click(); host.querySelector('#mode-instrument').click();
 		const aiEvents = [];
 		const aiToolbar = new AIToolbarView(host.querySelector('#ai-toolbar'), { openSettings: () => aiEvents.push('settings'), changeStrength: value => aiEvents.push(`strength:${value}`), correct: () => aiEvents.push('correct'), discard: () => aiEvents.push('discard'), complete: () => aiEvents.push('complete'), cancel: () => aiEvents.push('cancel') });
 		aiToolbar.setService('本機'); aiToolbar.setStatus('ready'); aiToolbar.setStrengthDisplay({ text: '5 / 10', title: 'test', ariaValueText: 'five' }); aiToolbar.setControls({ disabled: false, correct: false, correctTitle: 'go', discard: false, discardTitle: 'undo', complete: false }); aiToolbar.setBusy(true);
@@ -135,7 +135,7 @@ try {
 	assert.equal(result.zoomEvents.length, 1); assert.ok(result.zoomEvents[0] < 1);
 	assert.deepEqual(result.overlayEvents, ['preview:1.5', 'change:true:0:1.5']); assert.equal(result.formantValue, '+1.5');
 	assert.deepEqual(result.manualBox, { hidden: false, left: '92px', width: '23px', pointerEvents: 'none' });
-	assert.deepEqual(result.panelEvents, ['open', 'export', 'save', 'mode:1']); assert.equal(result.headerStatus, 'ready'); assert.equal(result.headerMode, true);
+	assert.deepEqual(result.panelEvents, ['open', 'export', 'overwrite', 'save', 'mode:1']); assert.equal(result.headerStatus, 'ready'); assert.equal(result.headerMode, true);
 	assert.deepEqual(result.aiEvents, ['strength:7', 'correct', 'discard', 'complete', 'cancel', 'settings']); assert.equal(result.aiStatus, 'ready'); assert.equal(result.aiBusy, 'true');
 	assert.deepEqual(result.optionEvents, ['key:c-major']); assert.equal(result.keyLabel, 'C 大調'); assert.equal(result.penEnabled, true);
 	assert.deepEqual(result.globalEvents, ['ramp:120', 'slope:80', 'reset:pitch', 'clear']); assert.equal(result.ramp, '120');

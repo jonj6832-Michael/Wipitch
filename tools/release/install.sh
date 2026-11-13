@@ -1,5 +1,5 @@
 #!/bin/sh
-# WiPitch 離線版安裝：複製到 ~/.local/share/wipitch，並建立 ~/.local/bin/wipitch 指令。
+# WiPitch 安裝：複製程式、建立 Python 虛擬環境並安裝 Librosa 分析依賴。
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
 DEST="$HOME/.local/share/wipitch"
@@ -22,6 +22,20 @@ if [ "$SRC" != "$DEST" ]; then
 	mkdir -p "$DEST"
 	cp -R "$SRC/." "$DEST/"
 fi
+
+PYTHON="$(command -v python3 || true)"
+if [ -z "$PYTHON" ]; then
+	echo "找不到 Python 3。WiPitch 的參考音軌節拍與和弦分析需要 Python 3。"
+	echo "  macOS：brew install python"
+	echo "  Ubuntu/Debian：sudo apt install python3 python3-venv"
+	exit 1
+fi
+
+if ! "$PYTHON" -m venv "$DEST/.venv"; then
+	echo "無法建立 Python 虛擬環境，請確認已安裝 python3-venv。"
+	exit 1
+fi
+"$DEST/.venv/bin/python" -m pip install --disable-pip-version-check -r "$DEST/requirements-librosa.txt"
 mkdir -p "$BIN"
 cat > "$BIN/wipitch" <<EOF
 #!/bin/sh

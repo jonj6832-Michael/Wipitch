@@ -16,6 +16,7 @@
 				<option value="workstation">完整工作站</option>
 				<option value="focus">專注編輯</option>
 				<option value="readable">高可讀性</option>
+				<option value="guide">引導模式</option>
 			</select>
 		</label>
 		<button id="open-audio" type="button">開啟音檔</button>
@@ -28,8 +29,9 @@
 			<span id="clock">0:00.000</span>
 		</div>
 		<button id="export" disabled>匯出 WAV</button>
-		<button id="save" disabled>存檔</button>
-		<label class="file">讀檔<input type="file" id="open-project" accept=".json"></label>
+		<button id="overwrite-original" disabled title="將目前修改後的聲音覆寫回原音檔；系統會保留一次安全備份">回存原檔</button>
+		<button id="save" disabled>儲存檢測檔案</button>
+		<label class="file">讀取檢測檔案<input type="file" id="open-project" accept=".wipitch-detection.json,.wipitch.json,.json,application/json"></label>
 		<button id="training-library-open" type="button">訓練資料庫管理</button>
 		<div class="modes" title="移調時音色要不要跟著跑">
 			<button id="mode-voice" class="on" title="人聲：移調時保留音色，拉高 7 個半音仍是同一個人">人聲</button>
@@ -50,12 +52,6 @@
 			<input id="ai-strength" type="range" min="1" max="10" step="1" value="5" title="傳統模式：等級越高，越小的走音也會被選中；入選後完整修正音高中心。">
 			<output id="ai-strength-value" for="ai-strength">5 / 10 · ≥288ms</output>
 		<button id="ai-correct" type="button" disabled>AI 檢測</button>
-		<label class="tempo-field">拍號 <select id="tempo-meter" aria-label="預設拍號"><option value="4/4">4/4</option><option value="3/4">3/4</option><option value="2/2">2/2</option></select></label>
-		<label class="tempo-field">BPM <input id="tempo-bpm" type="number" min="30" max="300" step="1" value="120" aria-label="預設 BPM"></label>
-		<label class="tempo-field" title="後續拍點允許相對前一次 BPM 偏移的範圍">容許 ±<input id="tempo-tolerance" type="number" min="1" max="25" step="1" value="5" aria-label="拍點 BPM 容許百分比">%</label>
-		<label class="tempo-field" title="候選起音相對附近背景至少要突出多少個標準差；越高越嚴格">起音突出門檻 <input id="onset-prominence" type="number" min="0.50" max="3.00" step="0.05" value="0.65" aria-label="起音突出門檻"></label>
-		<label class="tempo-field" title="候選拍點的強度、預測位置與後續節奏綜合分數；越高越容易保留綠色 X">拍點確認門檻 <input id="beat-confirmation" type="number" min="0.30" max="0.90" step="0.01" value="0.58" aria-label="拍點確認門檻"></label>
-		<button id="sync-reference" type="button" disabled aria-pressed="false" title="請先載入參考音軌">同步參考音軌</button>
 		<button id="ai-undo" type="button" disabled>放棄</button>
 		<button id="ai-clear-marks" type="button" disabled>完成工作</button>
 		<button id="ai-cancel" type="button" hidden>取消修正</button>
@@ -74,6 +70,27 @@
 			<div id="ai-settings-status" role="status"></div>
 			<div class="ai-dialog-actions"><button id="ai-test" type="button">讀取模型／測試連線</button><button id="ai-close" type="button">取消</button><button id="ai-save" type="submit">套用設定</button></div>
 		</form>
+	</dialog>
+	<dialog id="guide-dialog" aria-labelledby="guide-title">
+		<div class="guide-shell">
+			<div class="guide-heading">
+				<div>
+					<span id="guide-progress" class="guide-progress">步驟 1 / 12</span>
+					<h2 id="guide-title">導入主音軌</h2>
+				</div>
+				<button id="guide-close" type="button" class="guide-close" aria-label="關閉引導">×</button>
+			</div>
+			<ol id="guide-steps" class="guide-steps"></ol>
+			<p id="guide-description" class="guide-description"></p>
+			<div class="guide-tip">引導模式只控制流程，不會限制你直接操作編輯器；關閉後可隨時從「引導模式」重新開始。</div>
+			<div class="guide-actions">
+				<button id="guide-skip" type="button" class="guide-secondary" hidden>略過參考音軌</button>
+				<button id="guide-finish" type="button" class="guide-secondary" hidden>完成引導</button>
+				<span class="spacer"></span>
+				<button id="guide-action" type="button" class="guide-primary">選擇主音軌</button>
+				<button id="guide-next" type="button" class="guide-primary">下一步</button>
+			</div>
+		</div>
 	</dialog>
 
 	<main id="stage" hidden>
@@ -164,8 +181,15 @@
 			<input type="range" id="ref-amp-zoom" min="0" max="1" step="0.001" value="0.2314"
 				title="參考音軌波形放大（只影響顯示）。雙擊還原（Alt+滾輪）">
 			<div id="bg-bar">
+				<button id="sync-reference" type="button" disabled title="分析目前檢測範圍的參考音軌節拍與和弦">分析節拍與和弦</button>
 				<button id="ref-anchor-set" type="button" title="可在不同檢測範圍建立多個錨點；已有拍點的範圍會先清除再重新錨定">⚓ 錨定</button>
 				<button id="ref-beat-clear" type="button" title="清除目前檢測範圍內所有節拍標記與錨點">清除</button>
+				<label class="tempo-field" title="節奏樂器重視快速突波；旋律樂器也評估較慢的音量上升">樂器特性 <select id="reference-instrument-profile" aria-label="參考音軌樂器特性"><option value="melody">旋律樂器</option><option value="rhythm">節奏樂器</option></select></label>
+				<label class="tempo-field">拍號 <select id="tempo-meter" aria-label="預設拍號"><option value="4/4">4/4</option><option value="3/4">3/4</option><option value="2/2">2/2</option></select></label>
+				<label class="tempo-field">BPM <input id="tempo-bpm" type="number" min="30" max="300" step="1" value="120" aria-label="預設 BPM"></label>
+				<label class="tempo-field" title="每一小節相對前一小節 BPM 的搜尋範圍，上限 10%">容許 ±<input id="tempo-tolerance" type="number" min="1" max="10" step="1" value="5" aria-label="拍點 BPM 容許百分比">%</label>
+				<label class="tempo-field" title="候選起音相對附近背景至少要突出多少個標準差；越高越嚴格">起音突出 <input id="onset-prominence" type="number" min="0.50" max="3.00" step="0.05" value="0.65" aria-label="起音突出門檻"></label>
+				<label class="tempo-field" title="候選拍點的綜合分數；越高越容易保留綠色 X">拍點確認 <input id="beat-confirmation" type="number" min="0.30" max="0.90" step="0.01" value="0.58" aria-label="拍點確認門檻"></label>
 				<span id="ref-beat-status" role="status">尚未錨定</span>
 				<label class="file" title="載入一個一起播放的參考音檔（伴奏、導唱），只用來監聽，不會匯出">
 					<span id="bg-file-text">載入參考音軌</span><input type="file" id="bg-file" accept="audio/*">
